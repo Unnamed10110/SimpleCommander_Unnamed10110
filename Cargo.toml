@@ -1,0 +1,32 @@
+[workspace]
+resolver = "2"
+exclude = ["plugins"]
+members = [
+    "crates/sc-core",
+    "crates/sc-shell",
+    "crates/sc-index",
+    "crates/sc-ops",
+    "crates/sc-plugins",
+    "crates/sc-app",
+    "crates/sc-bench",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/simplecommander/simplecommander"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+
+# Fast iterative dev builds; dependencies still optimized so the UI is usable.
+[profile.dev]
+opt-level = 0
+
+[profile.dev.package."*"]
+opt-level = 2

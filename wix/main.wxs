@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="windows-1252"?>
+<!--
+  WiX source for the SimpleCommander MSI installer.
+  Build with cargo-wix:  cargo install cargo-wix && cargo wix -p sc-app
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+
+  <Product
+      Id="*"
+      Name="SimpleCommander"
+      UpgradeCode="6E7C9A44-2C5B-4B8B-9D9E-1A54C3B7F0A1"
+      Manufacturer="SimpleCommander project"
+      Language="1033"
+      Codepage="1252"
+      Version="$(var.Version)">
+
+    <Package
+        Id="*"
+        Keywords="Installer"
+        Description="SimpleCommander — fast dual-pane file explorer"
+        Manufacturer="SimpleCommander project"
+        InstallerVersion="450"
+        Languages="1033"
+        Compressed="yes"
+        InstallScope="perMachine"
+        SummaryCodepage="1252" />
+
+    <MajorUpgrade
+        Schedule="afterInstallInitialize"
+        DowngradeErrorMessage="A newer version of [ProductName] is already installed. Setup will now exit." />
+
+    <Media Id="1" Cabinet="media1.cab" EmbedCab="yes" DiskPrompt="CD-ROM #1" />
+    <Property Id="DiskPrompt" Value="SimpleCommander Installation" />
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder" Name="PFiles">
+        <Directory Id="APPLICATIONFOLDER" Name="SimpleCommander">
+          <Component Id="MainExecutable" Guid="7B1D4B32-8E0A-4B62-9C41-D25B6A0F13E2" Win64="yes">
+            <File
+                Id="SimpleCommanderExe"
+                Name="simplecommander.exe"
+                DiskId="1"
+                Source="$(var.CargoTargetBinDir)\simplecommander.exe"
+                KeyPath="yes" />
+          </Component>
+          <!-- Optional "Open in SimpleCommander" verb on folders. -->
+          <Component Id="ShellVerb" Guid="A3E14C58-90F2-4A7E-8D36-52C4E0B7D9C3" Win64="yes">
+            <RegistryKey Root="HKLM" Key="SOFTWARE\Classes\Directory\shell\SimpleCommander">
+              <RegistryValue Type="string" Value="Open in SimpleCommander" KeyPath="yes" />
+              <RegistryValue Type="string" Name="Icon" Value="[APPLICATIONFOLDER]simplecommander.exe,0" />
+            </RegistryKey>
+            <RegistryKey Root="HKLM" Key="SOFTWARE\Classes\Directory\shell\SimpleCommander\command">
+              <RegistryValue Type="string" Value="&quot;[APPLICATIONFOLDER]simplecommander.exe&quot; &quot;%1&quot;" />
+            </RegistryKey>
+          </Component>
+        </Directory>
+      </Directory>
+
+      <Directory Id="ProgramMenuFolder" Name="Programs">
+        <Directory Id="AppProgramMenuFolder" Name="SimpleCommander">
+          <Component Id="StartMenuShortcut" Guid="C9F03D77-64B1-4CF2-A4D8-30E97F6B21A4">
+            <Shortcut
+                Id="StartMenuShortcutExe"
+                Name="SimpleCommander"
+                Description="Fast dual-pane file explorer"
+                Target="[APPLICATIONFOLDER]simplecommander.exe"
+                WorkingDirectory="APPLICATIONFOLDER"
+                Icon="AppIcon" />
+            <RemoveFolder Id="RemoveAppProgramMenuFolder" On="uninstall" />
+            <RegistryValue
+                Root="HKCU"
+                Key="Software\SimpleCommander"
+                Name="installed"
+                Type="integer"
+                Value="1"
+                KeyPath="yes" />
+          </Component>
+        </Directory>
+      </Directory>
+    </Directory>
+
+    <Feature Id="MainProgram" Title="SimpleCommander" Level="1" Absent="disallow">
+      <ComponentRef Id="MainExecutable" />
+      <ComponentRef Id="StartMenuShortcut" />
+    </Feature>
+    <Feature Id="ShellIntegration" Title="Folder context-menu entry" Level="1">
+      <ComponentRef Id="ShellVerb" />
+    </Feature>
+
+    <Icon Id="AppIcon" SourceFile="..\crates\sc-app\assets\icon.ico" />
+    <Property Id="ARPPRODUCTICON" Value="AppIcon" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/simplecommander/simplecommander" />
+    <UI>
+      <UIRef Id="WixUI_FeatureTree" />
+    </UI>
+    <Property Id="WIXUI_INSTALLDIR" Value="APPLICATIONFOLDER" />
+  </Product>
+</Wix>

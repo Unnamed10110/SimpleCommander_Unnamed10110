@@ -1,0 +1,13 @@
+[package]
+name = "sc-plugins"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = "1.0.104"
+sc-core = { path = "../sc-core" }
+serde = "1.0.229"
+serde_json = "1.0.151"
+toml = "1.1.4"
+wasmtime = "47.0.3"

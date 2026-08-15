@@ -1,0 +1,9 @@
+/target
+*.pdb
+/plugins-build/target
+settings.toml
+sc-tags.db
+/dist
+/screenshot*.png
+/run-log.txt
+/err-*.txt

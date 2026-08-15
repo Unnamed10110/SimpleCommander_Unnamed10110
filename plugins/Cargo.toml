@@ -1,0 +1,10 @@
+# Guest-side plugin workspace: compiled to wasm32-unknown-unknown,
+# intentionally separate from the host workspace.
+[workspace]
+resolver = "2"
+members = ["image-dimensions", "crc32-command"]
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true

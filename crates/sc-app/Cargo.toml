@@ -1,0 +1,41 @@
+[package]
+name = "sc-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SimpleCommander — dual-pane file explorer"
+build = "build.rs"
+
+[[bin]]
+name = "simplecommander"
+path = "src/main.rs"
+
+[dependencies]
+sc-core = { path = "../sc-core" }
+sc-shell = { path = "../sc-shell" }
+sc-index = { path = "../sc-index" }
+sc-ops = { path = "../sc-ops" }
+sc-plugins = { path = "../sc-plugins" }
+eframe = { version = "0.36.1", features = ["wgpu"] }
+egui_extras = { version = "0.36.1", features = ["image", "svg"] }
+crossbeam-channel = "0.5.16"
+serde = "1.0.229"
+toml = "1.1.4"
+image = "0.25.10"
+rfd = "0.17.2"
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+zip = "8.6.0"
+regex = "1.13.1"
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_Com", "Win32_Graphics_Gdi"] }
+egui = "0.36.1"
+parking_lot = "0.12.5"
+lofty = "0.22"
+rodio = { version = "0.20", default-features = false, features = ["symphonia-all"] }
+wry = "0.53"
+raw-window-handle = "0.6"
+dpi = "0.1"
+url = "2"
+sha2 = "0.10"
+
+[build-dependencies]
+winresource = "0.1"

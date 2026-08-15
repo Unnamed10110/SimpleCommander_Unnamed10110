@@ -1,0 +1,11 @@
+[package]
+name = "sc-ops"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+crossbeam-channel = "0.5.16"
+parking_lot = "0.12.5"
+sc-core = { path = "../sc-core" }
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_UI_Shell", "Win32_System_Com", "Win32_UI_Shell_Common"] }

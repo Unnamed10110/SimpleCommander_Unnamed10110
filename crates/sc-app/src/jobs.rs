@@ -49,6 +49,12 @@ pub enum Job {
     Checksum { path: PathBuf },
     /// Subdirectory names only (for the tree sidebar).
     ListDirs { path: PathBuf },
+    CompareFolders {
+        query_id: u64,
+        left: PathBuf,
+        right: PathBuf,
+        recursive: bool,
+    },
 }
 
 pub enum PreviewContent {
@@ -84,6 +90,11 @@ pub enum UiMsg {
     Checksum { path: PathBuf, value: Option<String> },
     DirChanged { pane: usize, tab_uid: u64 },
     DirsListed { path: PathBuf, dirs: Vec<String> },
+    RecycleMeta { items: Vec<sc_shell::recycle::RecycleItem> },
+    CompareResult {
+        query_id: u64,
+        rows: Vec<crate::compare::CompareRow>,
+    },
 }
 
 pub struct JobEngine {
@@ -170,6 +181,27 @@ fn run_job(
     };
     match job {
         Job::ReadDir { token, path, flatten } => {
+            if sc_shell::recycle::is_recycle_path(&path) {
+                match sc_shell::recycle::list_recycle() {
+                    Ok(items) => {
+                        send(UiMsg::RecycleMeta { items: items.clone() });
+                        let entries: Vec<FsEntry> = items.iter().map(|i| i.to_entry()).collect();
+                        send(UiMsg::Batch {
+                            token,
+                            entries,
+                            done: true,
+                            error: None,
+                        });
+                    }
+                    Err(e) => send(UiMsg::Batch {
+                        token,
+                        entries: Vec::new(),
+                        done: true,
+                        error: Some(e),
+                    }),
+                }
+                return;
+            }
             if let Some(listing) = crate::vfs::zip_listing(&path) {
                 match listing {
                     Ok(entries) => {
@@ -259,7 +291,7 @@ fn run_job(
             }
         }
         Job::Preview { path, generation } => {
-            let content = load_preview(&path);
+            let content = load_preview(&path, plugins);
             send(UiMsg::Preview { path, generation, content });
         }
         Job::ColumnValue { plugin, path } => {
@@ -285,6 +317,15 @@ fn run_job(
             dirs.sort_by(|a, b| sc_core::sort::natural_cmp(a, b));
             send(UiMsg::DirsListed { path, dirs });
         }
+        Job::CompareFolders {
+            query_id,
+            left,
+            right,
+            recursive,
+        } => {
+            let rows = crate::compare::compare_folders(&left, &right, recursive);
+            send(UiMsg::CompareResult { query_id, rows });
+        }
     }
 }
 
@@ -303,7 +344,23 @@ const VIDEO_PREVIEW_EXTS: &[&str] =
 const HTML_PREVIEW_EXTS: &[&str] = &["html", "htm", "xhtml"];
 const HEX_MAX: usize = 128 * 1024;
 
-fn load_preview(path: &std::path::Path) -> PreviewContent {
+fn load_preview(
+    path: &std::path::Path,
+    plugins: &parking_lot::RwLock<sc_plugins::host::PluginHost>,
+) -> PreviewContent {
+    if let Some((kind, body)) = plugins.read().preview(path) {
+        return match kind.as_str() {
+            "text" => PreviewContent::Text(body),
+            "hex" => {
+                let bytes = body.into_bytes();
+                PreviewContent::Hex {
+                    file_size: bytes.len() as u64,
+                    bytes,
+                }
+            }
+            _ => PreviewContent::Info(body),
+        };
+    }
     let ext = path
         .extension()
         .map(|e| e.to_string_lossy().to_lowercase())

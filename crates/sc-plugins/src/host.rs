@@ -10,9 +10,12 @@
 //! - `sc_run_command(ptr, len) -> i64`         optional; JSON in (paths), JSON out
 //! - `sc_column_value(ptr, len) -> i64`        optional; path in, value string out
 //! - `sc_list_archive(ptr, len) -> i64`        optional; path in, JSON entries out
+//! - `sc_preview(ptr, len) -> i64`             optional; path in, JSON `{kind,body}` out
+//! - `sc_on_event(ptr, len) -> i64`            optional; JSON hook payload in
 //!
 //! Host imports (module `"sc"`), all capability-checked:
 //! - `read_file(ptr, len) -> i64`              read a file the user granted access to
+//! - `write_file(path_ptr, path_len, data_ptr, data_len) -> i32`
 //! - `log(ptr, len)`
 //!
 //! Packed i64 return: high 32 bits = ptr, low 32 bits = len; 0 = error/none.
@@ -27,6 +30,8 @@ use wasmtime::{Caller, Config, Engine, Extern, Linker, Module, Store, TypedFunc}
 const FUEL_BUDGET: u64 = 5_000_000_000;
 /// Refuse to hand more than this many bytes into a guest in one read.
 const MAX_READ_BYTES: u64 = 64 * 1024 * 1024;
+/// Cap plugin file writes so a buggy hook cannot fill the disk.
+const MAX_WRITE_BYTES: u64 = 8 * 1024 * 1024;
 
 pub struct LoadedPlugin {
     pub manifest: PluginManifest,
@@ -41,15 +46,19 @@ impl LoadedPlugin {
     pub fn is_column(&self) -> bool {
         self.manifest.kinds.iter().any(|k| k == "column")
     }
+    pub fn is_preview(&self) -> bool {
+        self.manifest.kinds.iter().any(|k| k == "preview")
+    }
     pub fn handles_ext(&self, ext: &str) -> bool {
         self.manifest.extensions.is_empty()
-            || self.manifest.extensions.iter().any(|e| e == ext)
+            || self.manifest.extensions.iter().any(|e| e.eq_ignore_ascii_case(ext))
     }
 }
 
 struct HostState {
     /// Permissions granted by the user to the running plugin.
     granted_read: bool,
+    granted_write: bool,
 }
 
 pub struct PluginHost {
@@ -133,7 +142,7 @@ impl PluginHost {
     }
 
     fn read_manifest(&self, module: &Module) -> Result<PluginManifest> {
-        let (mut store, instance) = self.instantiate(module, false)?;
+        let (mut store, instance) = self.instantiate(module, false, false)?;
         let f: TypedFunc<(), i64> = instance.get_typed_func(&mut store, "sc_manifest")?;
         let packed = f.call(&mut store, ())?;
         let bytes = read_packed(&mut store, &instance, packed)?;
@@ -145,7 +154,8 @@ impl PluginHost {
     pub fn run_command(&self, index: usize, paths: &[String]) -> Result<String> {
         let plugin = self.plugins.get(index).ok_or_else(|| anyhow!("no such plugin"))?;
         let granted_read = plugin.record.granted.iter().any(|g| g == "read-files");
-        let (mut store, instance) = self.instantiate(&plugin.module, granted_read)?;
+        let granted_write = plugin.record.granted.iter().any(|g| g == "write-files");
+        let (mut store, instance) = self.instantiate(&plugin.module, granted_read, granted_write)?;
         let input = serde_json::to_vec(paths)?;
         let in_ptr = write_guest(&mut store, &instance, &input)?;
         let f: TypedFunc<(i32, i32), i64> =
@@ -160,7 +170,8 @@ impl PluginHost {
     pub fn column_value(&self, index: usize, path: &str) -> Option<String> {
         let plugin = self.plugins.get(index)?;
         let granted_read = plugin.record.granted.iter().any(|g| g == "read-files");
-        let (mut store, instance) = self.instantiate(&plugin.module, granted_read).ok()?;
+        let granted_write = plugin.record.granted.iter().any(|g| g == "write-files");
+        let (mut store, instance) = self.instantiate(&plugin.module, granted_read, granted_write).ok()?;
         let input = path.as_bytes();
         let in_ptr = write_guest(&mut store, &instance, input).ok()?;
         let f: TypedFunc<(i32, i32), i64> =
@@ -171,12 +182,95 @@ impl PluginHost {
         if s.is_empty() { None } else { Some(s) }
     }
 
+    /// Plugin preview for a file. Returns `(kind, body)` where kind is
+    /// `text` / `info` / `hex`. Failures are ignored.
+    pub fn preview(&self, path: &Path) -> Option<(String, String)> {
+        let ext = path
+            .extension()
+            .map(|e| e.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        let path_s = path.to_string_lossy().into_owned();
+        for (i, p) in self.plugins.iter().enumerate() {
+            if !p.is_preview() || !p.handles_ext(&ext) {
+                continue;
+            }
+            if let Ok(v) = self.run_preview(i, &path_s) {
+                return Some(v);
+            }
+        }
+        None
+    }
+
+    fn run_preview(&self, index: usize, path: &str) -> Result<(String, String)> {
+        let plugin = self.plugins.get(index).ok_or_else(|| anyhow!("no such plugin"))?;
+        let granted_read = plugin.record.granted.iter().any(|g| g == "read-files");
+        let granted_write = plugin.record.granted.iter().any(|g| g == "write-files");
+        let (mut store, instance) = self.instantiate(&plugin.module, granted_read, granted_write)?;
+        let input = path.as_bytes();
+        let in_ptr = write_guest(&mut store, &instance, input)?;
+        let f: TypedFunc<(i32, i32), i64> =
+            instance.get_typed_func(&mut store, "sc_preview")?;
+        let packed = f.call(&mut store, (in_ptr, input.len() as i32))?;
+        let bytes = read_packed(&mut store, &instance, packed)?;
+        let v: serde_json::Value = serde_json::from_slice(&bytes)?;
+        let kind = v
+            .get("kind")
+            .and_then(|k| k.as_str())
+            .unwrap_or("info")
+            .to_string();
+        let body = v
+            .get("body")
+            .and_then(|b| b.as_str())
+            .unwrap_or("")
+            .to_string();
+        Ok((kind, body))
+    }
+
+    /// Fire `sc_on_event` on every plugin that exports it. Errors are logged.
+    pub fn run_hooks(&self, event: &str, sources: &[PathBuf], dests: &[PathBuf]) {
+        let payload = serde_json::json!({
+            "event": event,
+            "sources": sources.iter().map(|p| p.to_string_lossy().into_owned()).collect::<Vec<_>>(),
+            "dests": dests.iter().map(|p| p.to_string_lossy().into_owned()).collect::<Vec<_>>(),
+        });
+        let bytes = match serde_json::to_vec(&payload) {
+            Ok(b) => b,
+            Err(_) => return,
+        };
+        for plugin in &self.plugins {
+            if let Err(e) = self.run_hook(plugin, &bytes) {
+                eprintln!("[plugin] hook {} on {}: {e}", event, plugin.manifest.name);
+            }
+        }
+    }
+
+    fn run_hook(&self, plugin: &LoadedPlugin, input: &[u8]) -> Result<()> {
+        let granted_read = plugin.record.granted.iter().any(|g| g == "read-files");
+        let granted_write = plugin.record.granted.iter().any(|g| g == "write-files");
+        let (mut store, instance) = self.instantiate(&plugin.module, granted_read, granted_write)?;
+        let f: TypedFunc<(i32, i32), i64> =
+            match instance.get_typed_func(&mut store, "sc_on_event") {
+                Ok(f) => f,
+                Err(_) => return Ok(()),
+            };
+        let in_ptr = write_guest(&mut store, &instance, input)?;
+        let _ = f.call(&mut store, (in_ptr, input.len() as i32))?;
+        Ok(())
+    }
+
     fn instantiate(
         &self,
         module: &Module,
         granted_read: bool,
+        granted_write: bool,
     ) -> Result<(Store<HostState>, wasmtime::Instance)> {
-        let mut store = Store::new(&self.engine, HostState { granted_read });
+        let mut store = Store::new(
+            &self.engine,
+            HostState {
+                granted_read,
+                granted_write,
+            },
+        );
         store.set_fuel(FUEL_BUDGET)?;
         let mut linker: Linker<HostState> = Linker::new(&self.engine);
 
@@ -208,6 +302,35 @@ impl PluginHost {
                 match write_guest_from_caller(&mut caller, &data) {
                     Ok(p) => pack(p, data.len() as i32),
                     Err(_) => 0,
+                }
+            },
+        )?;
+
+        linker.func_wrap(
+            "sc",
+            "write_file",
+            |mut caller: Caller<'_, HostState>,
+             path_ptr: i32,
+             path_len: i32,
+             data_ptr: i32,
+             data_len: i32|
+             -> i32 {
+                if !caller.data().granted_write {
+                    return 0;
+                }
+                if data_len < 0 || data_len as u64 > MAX_WRITE_BYTES {
+                    return 0;
+                }
+                let Ok(path) = read_guest_str(&mut caller, path_ptr, path_len) else {
+                    return 0;
+                };
+                let Ok(data) = read_guest_bytes(&mut caller, data_ptr, data_len) else {
+                    return 0;
+                };
+                if std::fs::write(&path, &data).is_ok() {
+                    1
+                } else {
+                    0
                 }
             },
         )?;
@@ -274,11 +397,18 @@ fn write_guest_from_caller(caller: &mut Caller<'_, HostState>, data: &[u8]) -> R
 }
 
 fn read_guest_str(caller: &mut Caller<'_, HostState>, ptr: i32, len: i32) -> Result<String> {
+    Ok(String::from_utf8_lossy(&read_guest_bytes(caller, ptr, len)?).into_owned())
+}
+
+fn read_guest_bytes(caller: &mut Caller<'_, HostState>, ptr: i32, len: i32) -> Result<Vec<u8>> {
+    if len < 0 {
+        return Err(anyhow!("negative length"));
+    }
     let memory = caller
         .get_export("memory")
         .and_then(Extern::into_memory)
         .ok_or_else(|| anyhow!("no memory"))?;
     let mut buf = vec![0u8; len as usize];
     memory.read(&*caller, ptr as usize, &mut buf)?;
-    Ok(String::from_utf8_lossy(&buf).into_owned())
+    Ok(buf)
 }

@@ -8,5 +8,6 @@ pub mod dropsource;
 pub mod enumerate;
 pub mod everything;
 pub mod icons;
+pub mod recycle;
 pub mod volumes;
 pub mod watcher;

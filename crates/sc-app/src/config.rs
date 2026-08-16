@@ -109,6 +109,12 @@ pub struct Settings {
     /// If true, plain Del deletes permanently instead of recycling.
     pub delete_permanent_default: bool,
     pub conflict_default: ConflictDefault,
+    /// Parallel transfer workers (1–4). 1 is strictly sequential.
+    #[serde(default = "default_transfer_jobs")]
+    pub transfer_jobs: u32,
+    /// Where the preview pane is hosted.
+    #[serde(default)]
+    pub preview_placement: PreviewPlacement,
 
     // ----- search & index -----
     /// Build the background filename index at startup.
@@ -132,6 +138,29 @@ pub struct Settings {
     /// Keyboard shortcuts. Missing keys in settings.toml keep the defaults.
     #[serde(default)]
     pub keymap: Keymap,
+}
+
+/// Where the file preview is shown.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum PreviewPlacement {
+    #[default]
+    Floating,
+    Right,
+    Bottom,
+}
+
+impl PreviewPlacement {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Floating => "Floating window",
+            Self::Right => "Docked right",
+            Self::Bottom => "Docked bottom",
+        }
+    }
+}
+
+fn default_transfer_jobs() -> u32 {
+    2
 }
 
 fn default_terminal_command() -> String {
@@ -158,6 +187,8 @@ impl Default for Settings {
             default_layout: DefaultLayout::DualVertical,
             delete_permanent_default: false,
             conflict_default: ConflictDefault::Ask,
+            transfer_jobs: 2,
+            preview_placement: PreviewPlacement::Floating,
             index_enabled: true,
             search_max_results: 500,
             content_search_max_mb: 16,

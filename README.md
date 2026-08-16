@@ -14,8 +14,8 @@ A fast, XYplorer-class dual-pane file explorer for Windows, written in Rust.
 - **Instant search**: Everything-style NTFS MFT indexing (`FSCTL_ENUM_USN_DATA`)
   with live USN-journal updates when running elevated; graceful fallback
   indexer otherwise. Plus scoped content search.
-- **AMOLED theme**: the flagship theme is pure `#000000` everywhere — made for
-  OLED panels — with a standard dark theme as alternative.
+- **Themes**: AMOLED (true `#000000`, any accent color), a standard dark
+  theme, and two light themes (cool / warm).
 - **Full shell integration**: Explorer context menu, Open With, Properties,
   recycle-bin deletes via `IFileOperation`, CF_HDROP clipboard interop
   (cut/copy/paste round-trips with Explorer), native OLE drag & drop.

@@ -100,6 +100,124 @@ pub fn volume_for_path<'a>(volumes: &'a [VolumeInfo], path: &std::path::Path) ->
         .max_by_key(|v| v.root.as_os_str().len())
 }
 
+/// WSL distros visible under `\\wsl$` / `\\wsl.localhost`.
+pub fn wsl_distros() -> Vec<(String, PathBuf)> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for root in [r"\\wsl.localhost", r"\\wsl$"] {
+        let rd = match std::fs::read_dir(root) {
+            Ok(rd) => rd,
+            Err(_) => continue,
+        };
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if name.is_empty() || name.starts_with('.') {
+                continue;
+            }
+            let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(true);
+            if !is_dir {
+                continue;
+            }
+            if seen.insert(name.to_ascii_lowercase()) {
+                out.push((name, e.path()));
+            }
+        }
+        if !out.is_empty() {
+            break;
+        }
+    }
+    out.sort_by(|a, b| a.0.to_ascii_lowercase().cmp(&b.0.to_ascii_lowercase()));
+    out
+}
+
+/// Connected and remembered network shares (UNC roots).
+pub fn network_places() -> Vec<(String, PathBuf)> {
+    use windows::Win32::NetworkManagement::WNet::{RESOURCE_CONNECTED, RESOURCE_REMEMBERED};
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for scope in [RESOURCE_CONNECTED, RESOURCE_REMEMBERED] {
+        enum_net_scope(scope, &mut out, &mut seen);
+    }
+    out.sort_by(|a, b| a.0.to_ascii_lowercase().cmp(&b.0.to_ascii_lowercase()));
+    out
+}
+
+fn enum_net_scope(
+    scope: windows::Win32::NetworkManagement::WNet::NET_RESOURCE_SCOPE,
+    out: &mut Vec<(String, PathBuf)>,
+    seen: &mut std::collections::HashSet<String>,
+) {
+    use windows::Win32::Foundation::{ERROR_NO_MORE_ITEMS, HANDLE};
+    use windows::Win32::NetworkManagement::WNet::{
+        WNetCloseEnum, WNetEnumResourceW, WNetOpenEnumW, NETRESOURCEW, RESOURCETYPE_DISK,
+        RESOURCEUSAGE_CONNECTABLE,
+    };
+    unsafe {
+        let mut handle = HANDLE::default();
+        if WNetOpenEnumW(
+            scope,
+            RESOURCETYPE_DISK,
+            RESOURCEUSAGE_CONNECTABLE,
+            None,
+            &mut handle,
+        )
+        .is_err()
+        {
+            return;
+        }
+        let mut buf = vec![0u8; 16 * 1024];
+        loop {
+            let mut count = u32::MAX;
+            let mut size = buf.len() as u32;
+            let err = WNetEnumResourceW(
+                handle,
+                &mut count,
+                buf.as_mut_ptr() as *mut _,
+                &mut size,
+            );
+            if err == ERROR_NO_MORE_ITEMS {
+                break;
+            }
+            if err.is_err() {
+                if size as usize > buf.len() {
+                    buf.resize(size as usize, 0);
+                    continue;
+                }
+                break;
+            }
+            if count == 0 {
+                break;
+            }
+            let recs = std::slice::from_raw_parts(buf.as_ptr() as *const NETRESOURCEW, count as usize);
+            for r in recs {
+                let remote = pwstr_to_string(r.lpRemoteName);
+                if remote.is_empty() {
+                    continue;
+                }
+                let key = remote.to_ascii_lowercase();
+                if !seen.insert(key) {
+                    continue;
+                }
+                let comment = pwstr_to_string(r.lpComment);
+                let label = if comment.is_empty() {
+                    remote.clone()
+                } else {
+                    format!("{remote} ({comment})")
+                };
+                out.push((label, PathBuf::from(remote)));
+            }
+        }
+        let _ = WNetCloseEnum(handle);
+    }
+}
+
+fn pwstr_to_string(p: windows::core::PWSTR) -> String {
+    if p.is_null() {
+        return String::new();
+    }
+    unsafe { p.to_string().unwrap_or_default() }
+}
+
 /// Common user folders for the sidebar (only existing ones are returned).
 pub fn known_folders() -> Vec<(String, PathBuf)> {
     let home = sc_core::state::dirs_home();

@@ -15,6 +15,8 @@ pub enum Glyph {
     Single,
     Gear,
     Terminal,
+    Copy,
+    Move,
 }
 
 pub fn button(ui: &mut Ui, glyph: Glyph, selected: bool, tip: &str) -> Response {
@@ -38,13 +40,12 @@ pub fn button(ui: &mut Ui, glyph: Glyph, selected: bool, tip: &str) -> Response 
     } else {
         visuals.text_color()
     };
-    paint(ui, rect.shrink(4.0), glyph, color);
+    paint_glyph(ui.painter(), rect.shrink(4.0), glyph, color);
     resp.on_hover_cursor(egui::CursorIcon::Default).on_hover_text(tip)
 }
 
-fn paint(ui: &mut Ui, r: Rect, glyph: Glyph, color: Color32) {
+pub fn paint_glyph(p: &egui::Painter, r: Rect, glyph: Glyph, color: Color32) {
     let stroke = Stroke::new(1.4, color);
-    let p = ui.painter();
     match glyph {
         Glyph::Back => {
             let c = r.center();
@@ -143,6 +144,46 @@ fn paint(ui: &mut Ui, r: Rect, glyph: Glyph, color: Color32) {
                 [Pos2::new(r.left() + 8.5, y + 2.5), Pos2::new(r.right() - 3.0, y + 2.5)],
                 stroke,
             );
+        }
+        Glyph::Copy => {
+            let back = Rect::from_min_max(
+                Pos2::new(r.left() + 1.0, r.top() + 1.0),
+                Pos2::new(r.right() - 4.0, r.bottom() - 4.0),
+            );
+            let front = Rect::from_min_max(
+                Pos2::new(r.left() + 4.0, r.top() + 4.0),
+                Pos2::new(r.right() - 1.0, r.bottom() - 1.0),
+            );
+            p.rect_stroke(back, 1.0, stroke, egui::StrokeKind::Inside);
+            p.rect_filled(front, 1.0, Color32::from_black_alpha(180));
+            p.rect_stroke(front, 1.0, stroke, egui::StrokeKind::Inside);
+            let plus = Pos2::new(front.right() - 1.0, front.bottom() - 1.0);
+            p.line_segment(
+                [Pos2::new(plus.x - 5.0, plus.y), Pos2::new(plus.x + 1.0, plus.y)],
+                Stroke::new(1.6, color),
+            );
+            p.line_segment(
+                [Pos2::new(plus.x - 2.0, plus.y - 3.0), Pos2::new(plus.x - 2.0, plus.y + 3.0)],
+                Stroke::new(1.6, color),
+            );
+        }
+        Glyph::Move => {
+            let doc = Rect::from_min_max(
+                Pos2::new(r.left() + 0.5, r.top() + 2.0),
+                Pos2::new(r.center().x + 1.0, r.bottom() - 1.0),
+            );
+            p.rect_stroke(doc, 1.0, stroke, egui::StrokeKind::Inside);
+            let tip = Pos2::new(r.right() - 0.5, r.center().y - 1.0);
+            let tail = Pos2::new(doc.right() + 1.0, r.center().y - 1.0);
+            p.line_segment([tail, tip], Stroke::new(1.6, color));
+            p.add(Shape::line(
+                vec![
+                    Pos2::new(tip.x - 4.0, tip.y - 3.5),
+                    tip,
+                    Pos2::new(tip.x - 4.0, tip.y + 3.5),
+                ],
+                Stroke::new(1.6, color),
+            ));
         }
     }
 }

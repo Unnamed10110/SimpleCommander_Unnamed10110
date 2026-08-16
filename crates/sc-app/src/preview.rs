@@ -339,6 +339,29 @@ pub fn draw(app: &mut ScApp, ctx: &egui::Context) {
         close(&mut app.preview);
         return;
     }
+    match app.settings.preview_placement {
+        crate::config::PreviewPlacement::Floating => draw_floating(app, ctx),
+        crate::config::PreviewPlacement::Right | crate::config::PreviewPlacement::Bottom => {
+            // Hosted from ui::draw as a docked panel.
+        }
+    }
+    finish_preview_frame(app, ctx);
+}
+
+pub fn draw_docked_panel(app: &mut ScApp, ui: &mut Ui) {
+    ui.horizontal(|ui| {
+        ui.strong("Preview");
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.small_button("×").clicked() {
+                close(&mut app.preview);
+            }
+        });
+    });
+    ui.separator();
+    preview_pane(app, ui);
+}
+
+fn draw_floating(app: &mut ScApp, ctx: &egui::Context) {
     let mut open = true;
     let screen = ctx.content_rect();
     let max_size = (screen.size() - egui::vec2(32.0, 32.0)).max(egui::vec2(320.0, 240.0));
@@ -358,6 +381,12 @@ pub fn draw(app: &mut ScApp, ctx: &egui::Context) {
         });
     if !open {
         close(&mut app.preview);
+    }
+}
+
+pub fn finish_preview_frame(app: &mut ScApp, ctx: &egui::Context) {
+    if !app.preview.enabled {
+        destroy_web(&mut app.preview);
         return;
     }
     let ppp = ctx.pixels_per_point();

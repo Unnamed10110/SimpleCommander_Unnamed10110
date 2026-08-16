@@ -18,6 +18,7 @@ pub fn draw(app: &mut ScApp, ctx: &egui::Context) {
     columns_dialog(app, ctx);
     about(app, ctx);
     everything_prompt(app, ctx);
+    folder_compare(app, ctx);
 }
 
 fn new_item_dialog(app: &mut ScApp, ctx: &egui::Context) {
@@ -101,8 +102,8 @@ fn conflict_dialog(app: &mut ScApp, ctx: &egui::Context) {
             });
         });
     if let Some(res) = answer {
-        let apply = app.conflict.take().map(|c| c.apply_to_all).unwrap_or(false);
-        app.ops.resolve_conflict(res, apply);
+        let apply = app.conflict.as_ref().map(|c| c.apply_to_all).unwrap_or(false);
+        app.answer_conflict(res, apply);
     }
 }
 
@@ -138,7 +139,7 @@ fn delete_confirm(app: &mut ScApp, ctx: &egui::Context) {
     if let Some(go) = decided {
         if let Some((paths, _)) = app.pending_delete.take() {
             if go {
-                app.ops.submit(Operation::Delete { paths, recycle: !permanent });
+                app.submit_op(Operation::Delete { paths, recycle: !permanent });
             }
         }
     }
@@ -330,7 +331,7 @@ fn batch_rename(app: &mut ScApp, ctx: &egui::Context) {
             }
         }
         for op in ops {
-            app.ops.submit(op);
+            app.submit_op(op);
         }
         app.batch_rename.open = false;
     } else {
@@ -665,3 +666,147 @@ fn everything_prompt(app: &mut ScApp, ctx: &egui::Context) {
     }
     app.show_everything_prompt = open;
 }
+
+fn folder_compare(app: &mut ScApp, ctx: &egui::Context) {
+    if !app.compare.open {
+        return;
+    }
+    let mut open = true;
+    let mut rerun = false;
+    let mut copy_left = false;
+    let mut copy_right = false;
+    let mut delete_sel = false;
+    egui::Window::new("Compare folders")
+        .open(&mut open)
+        .resizable(true)
+        .default_size([720.0, 480.0])
+        .show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(format!(
+                    "Left: {}   Right: {}",
+                    app.compare.left.display(),
+                    app.compare.right.display()
+                ));
+            });
+            ui.horizontal(|ui| {
+                if ui
+                    .checkbox(&mut app.compare.include_subfolders, "Include subfolders")
+                    .changed()
+                {
+                    rerun = true;
+                }
+                ui.separator();
+                let filter = app.compare.filter;
+                for opt in [
+                    crate::compare::CompareFilter::All,
+                    crate::compare::CompareFilter::LeftOnly,
+                    crate::compare::CompareFilter::RightOnly,
+                    crate::compare::CompareFilter::Different,
+                    crate::compare::CompareFilter::Same,
+                ] {
+                    if ui.selectable_label(filter == opt, opt.label()).clicked() {
+                        app.compare.filter = opt;
+                    }
+                }
+                if app.compare.running {
+                    ui.spinner();
+                    ui.weak("Comparing…");
+                }
+            });
+            ui.separator();
+            let filter = app.compare.filter;
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    let rows: Vec<(usize, String, String, bool)> = app
+                        .compare
+                        .rows
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, r)| filter.matches(r.kind))
+                        .map(|(i, r)| {
+                            (
+                                i,
+                                r.rel.clone(),
+                                r.kind.label().to_string(),
+                                app.compare.selected.contains(&i),
+                            )
+                        })
+                        .collect();
+                    for (i, rel, kind, sel) in rows {
+                        ui.horizontal(|ui| {
+                            let mut on = sel;
+                            if ui.checkbox(&mut on, "").changed() {
+                                if on {
+                                    app.compare.selected.insert(i);
+                                } else {
+                                    app.compare.selected.remove(&i);
+                                }
+                            }
+                            ui.monospace(kind);
+                            ui.label(rel);
+                        });
+                    }
+                });
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui.button("Copy → right").clicked() {
+                    copy_right = true;
+                }
+                if ui.button("Copy ← left").clicked() {
+                    copy_left = true;
+                }
+                if ui.button("Delete selected").clicked() {
+                    delete_sel = true;
+                }
+            });
+        });
+    if !open {
+        app.compare.open = false;
+        return;
+    }
+    if rerun {
+        app.run_compare();
+        return;
+    }
+    if copy_right || copy_left || delete_sel {
+        let selected: Vec<usize> = app.compare.selected.iter().copied().collect();
+        for i in selected {
+            let Some(row) = app.compare.rows.get(i) else { continue };
+            if row.is_dir {
+                continue;
+            }
+            if copy_right {
+                if let Some(src) = &row.left {
+                    app.submit_op(Operation::Copy {
+                        sources: vec![src.clone()],
+                        dest_dir: app.compare.right.clone(),
+                    });
+                }
+            } else if copy_left {
+                if let Some(src) = &row.right {
+                    app.submit_op(Operation::Copy {
+                        sources: vec![src.clone()],
+                        dest_dir: app.compare.left.clone(),
+                    });
+                }
+            } else if delete_sel {
+                let mut paths = Vec::new();
+                if let Some(p) = &row.left {
+                    paths.push(p.clone());
+                }
+                if let Some(p) = &row.right {
+                    paths.push(p.clone());
+                }
+                if !paths.is_empty() {
+                    app.submit_op(Operation::Delete {
+                        paths,
+                        recycle: true,
+                    });
+                }
+            }
+        }
+        app.compare.selected.clear();
+    }
+}
+

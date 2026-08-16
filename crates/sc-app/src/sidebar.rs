@@ -21,6 +21,9 @@ pub fn draw(app: &mut ScApp, ui: &mut Ui) {
                     favorites_section(app, ui);
                     drives_section(app, ui);
                     known_folders_section(app, ui);
+                    recycle_row(app, ui);
+                    wsl_section(app, ui);
+                    network_section(app, ui);
                     tree_section(app, ui);
                 });
         });
@@ -154,6 +157,93 @@ fn known_folders_section(app: &mut ScApp, ui: &mut Ui) {
         open = !open;
     }
     app.settings.session.sidebar_user_folders_open = open;
+    if let Some(p) = open_tab {
+        let pane = app.active_pane;
+        app.open_folder_in_new_tab(pane, p);
+    } else if let Some(p) = go {
+        let pane = app.active_pane;
+        app.navigate(pane, p);
+    }
+}
+
+fn recycle_row(app: &mut ScApp, ui: &mut Ui) {
+    let resp = ui.selectable_label(false, "🗑 Recycle Bin");
+    if resp.clicked() {
+        let pane = app.active_pane;
+        app.navigate(pane, sc_shell::recycle::recycle_root());
+    }
+    if resp.middle_clicked() {
+        let pane = app.active_pane;
+        app.open_folder_in_new_tab(pane, sc_shell::recycle::recycle_root());
+    }
+}
+
+fn wsl_section(app: &mut ScApp, ui: &mut Ui) {
+    let distros = sc_shell::volumes::wsl_distros();
+    if distros.is_empty() {
+        return;
+    }
+    let mut open = app.settings.session.sidebar_wsl_open;
+    let mut go: Option<PathBuf> = None;
+    let mut open_tab: Option<PathBuf> = None;
+    let resp = egui::CollapsingHeader::new(RichText::new("WSL").strong())
+        .open(Some(open))
+        .show(ui, |ui| {
+            for (name, path) in &distros {
+                let r = ui.selectable_label(false, format!("🐧 {name}"));
+                if r.clicked() {
+                    go = Some(path.clone());
+                }
+                if r.middle_clicked() {
+                    open_tab = Some(path.clone());
+                }
+            }
+        });
+    if resp.header_response.clicked() {
+        open = !open;
+    }
+    app.settings.session.sidebar_wsl_open = open;
+    if let Some(p) = open_tab {
+        let pane = app.active_pane;
+        app.open_folder_in_new_tab(pane, p);
+    } else if let Some(p) = go {
+        let pane = app.active_pane;
+        app.navigate(pane, p);
+    }
+}
+
+fn network_section(app: &mut ScApp, ui: &mut Ui) {
+    let mut places = sc_shell::volumes::network_places();
+    for p in &app.settings.session.unc_roots {
+        if !places.iter().any(|(_, q)| q == p) {
+            let label = p.display().to_string();
+            places.push((label, p.clone()));
+        }
+    }
+    let mut open = app.settings.session.sidebar_network_open;
+    let mut go: Option<PathBuf> = None;
+    let mut open_tab: Option<PathBuf> = None;
+    let resp = egui::CollapsingHeader::new(RichText::new("Network").strong())
+        .open(Some(open))
+        .show(ui, |ui| {
+            if places.is_empty() {
+                ui.weak("No shares");
+            }
+            for (name, path) in &places {
+                let r = ui.selectable_label(false, format!("🌐 {name}"));
+                if r.clicked() {
+                    go = Some(path.clone());
+                }
+                if r.middle_clicked() {
+                    open_tab = Some(path.clone());
+                }
+                r.on_hover_text(path.display().to_string());
+            }
+        });
+    if resp.header_response.clicked() {
+        open = !open;
+    }
+    app.settings.session.sidebar_network_open = open;
     if let Some(p) = open_tab {
         let pane = app.active_pane;
         app.open_folder_in_new_tab(pane, p);

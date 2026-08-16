@@ -18,8 +18,40 @@ pub fn draw(app: &mut ScApp, ui: &mut Ui) {
     handle_global_keys(app, &ctx);
     top_bar(app, ui);
     crate::sidebar::draw(app, ui);
+    if app.preview.enabled
+        && app.settings.preview_placement == crate::config::PreviewPlacement::Right
+    {
+        let inner = egui::Panel::right("preview-dock")
+            .resizable(true)
+            .default_size(app.preview_width)
+            .min_size(200.0)
+            .max_size(800.0)
+            .show(ui, |ui| {
+                crate::preview::draw_docked_panel(app, ui);
+            });
+        let w = inner.response.rect.width();
+        if (w - app.preview_width).abs() > 0.5 {
+            app.preview_width = w.clamp(200.0, 800.0);
+        }
+    }
     status_bar(app, ui);
     ops_panel(app, ui);
+    if app.preview.enabled
+        && app.settings.preview_placement == crate::config::PreviewPlacement::Bottom
+    {
+        let inner = egui::Panel::bottom("preview-dock-bottom")
+            .resizable(true)
+            .default_size(app.preview_height)
+            .min_size(140.0)
+            .max_size(600.0)
+            .show(ui, |ui| {
+                crate::preview::draw_docked_panel(app, ui);
+            });
+        let h = inner.response.rect.height();
+        if (h - app.preview_height).abs() > 0.5 {
+            app.preview_height = h.clamp(140.0, 600.0);
+        }
+    }
     central_panes(app, ui);
     pane_background_menu(app, &ctx);
     row_context_menu_popup(app, &ctx);
@@ -29,6 +61,7 @@ pub fn draw(app: &mut ScApp, ui: &mut Ui) {
     search_overlay(app, &ctx);
     palette_overlay(app, &ctx);
     toasts(app, &ctx);
+    paint_file_drag_badge(app, &ctx);
     handle_file_drops(app, &ctx);
 }
 
@@ -164,9 +197,10 @@ fn handle_global_keys(app: &mut ScApp, ctx: &egui::Context) {
     if km.open_terminal.consume(ctx) {
         app.open_terminal(pane);
     }
-    if km.go_up.consume(ctx)
+    if (km.go_up.consume(ctx)
         || km.parent_folder.consume(ctx)
-        || ctx.input_mut(|i| i.consume_key(Modifiers::ALT, Key::ArrowUp))
+        || ctx.input_mut(|i| i.consume_key(Modifiers::ALT, Key::ArrowUp)))
+        && !sc_shell::recycle::is_recycle_path(&app.panes[pane].tab().path)
     {
         if app.panes[pane].tab_mut().go_up() {
             app.request_listing(pane, false);
@@ -213,9 +247,16 @@ fn handle_global_keys(app: &mut ScApp, ctx: &egui::Context) {
         app.transfer_to_other_pane(pane, true);
     }
     if km.undo.consume(ctx) {
-        for op in app.undo.pop_undo() {
-            app.ops.submit(op);
-        }
+        app.undo();
+    }
+    let redo_alias = ctx.input(|i| {
+        i.modifiers.ctrl && i.modifiers.shift && !i.modifiers.alt && i.key_pressed(Key::Z)
+    });
+    if km.redo.consume(ctx) || redo_alias {
+        app.redo();
+    }
+    if km.compare_folders.consume(ctx) {
+        app.open_compare();
     }
     if km.rename.consume(ctx) {
         app.start_rename(pane);
@@ -437,9 +478,19 @@ fn top_bar(app: &mut ScApp, ui: &mut Ui) {
                     )
                     .clicked()
                 {
-                    for op in app.undo.pop_undo() {
-                        app.ops.submit(op);
-                    }
+                    app.undo();
+                    ui.close();
+                }
+                let redo_label = app.undo.redo_label().unwrap_or_else(|| "Redo".into());
+                let redo_chord = app.settings.keymap.redo.label();
+                if ui
+                    .add_enabled(
+                        app.undo.can_redo(),
+                        egui::Button::new(format!("{redo_label}\t{redo_chord}")),
+                    )
+                    .clicked()
+                {
+                    app.redo();
                     ui.close();
                 }
                 ui.separator();
@@ -494,6 +545,32 @@ fn top_bar(app: &mut ScApp, ui: &mut Ui) {
                         crate::preview::close(&mut app.preview);
                     }
                 }
+                ui.label("Preview placement");
+                let place = app.settings.preview_placement;
+                for opt in [
+                    crate::config::PreviewPlacement::Floating,
+                    crate::config::PreviewPlacement::Right,
+                    crate::config::PreviewPlacement::Bottom,
+                ] {
+                    if ui.radio(place == opt, opt.label()).clicked() {
+                        app.settings.preview_placement = opt;
+                        app.persist_settings();
+                    }
+                }
+                let dual = matches!(app.layout, PaneLayout::Dual(_));
+                if ui
+                    .add_enabled(
+                        dual,
+                        egui::Button::new(format!(
+                            "Compare folders\t{}",
+                            app.settings.keymap.compare_folders.label()
+                        )),
+                    )
+                    .clicked()
+                {
+                    app.open_compare();
+                    ui.close();
+                }
                 if ui.button("Columns...").clicked() {
                     app.show_columns = true;
                     ui.close();
@@ -506,16 +583,27 @@ fn top_bar(app: &mut ScApp, ui: &mut Ui) {
                 }
                 ui.separator();
                 ui.label("Theme:");
-                if ui
-                    .radio(app.theme.name == "amoled", "AMOLED (pure black)")
-                    .clicked()
-                {
-                    app.set_theme("amoled");
-                    crate::theme::apply(&ctx, &app.theme);
+                for (id, label) in crate::theme::catalog() {
+                    let selected = if *id == "amoled" {
+                        crate::theme::is_amoled(app.theme.name)
+                    } else {
+                        app.theme.name == *id
+                    };
+                    if ui.radio(selected, *label).clicked() {
+                        app.set_theme(id);
+                        crate::theme::apply(&ctx, &app.theme);
+                    }
                 }
-                if ui.radio(app.theme.name == "dark", "Dark").clicked() {
-                    app.set_theme("dark");
+                ui.label(if crate::theme::is_amoled(app.theme.name) {
+                    "AMOLED color:"
+                } else {
+                    "Accent:"
+                });
+                let mut hex = app.settings.accent.clone();
+                if crate::theme::accent_editor(ui, &mut hex, app.theme.accent) {
+                    app.set_accent(&hex);
                     crate::theme::apply(&ctx, &app.theme);
+                    app.persist_settings();
                 }
             });
             ui.menu_button("Go", |ui| {
@@ -534,9 +622,15 @@ fn top_bar(app: &mut ScApp, ui: &mut Ui) {
                     ui.close();
                 }
                 if ui.button(format!("Up\t{}", km.go_up.label())).clicked() {
-                    if app.panes[pane].tab_mut().go_up() {
+                    if !sc_shell::recycle::is_recycle_path(&app.panes[pane].tab().path)
+                        && app.panes[pane].tab_mut().go_up()
+                    {
                         app.request_listing(pane, false);
                     }
+                    ui.close();
+                }
+                if ui.button("Recycle Bin").clicked() {
+                    app.navigate(pane, sc_shell::recycle::recycle_root());
                     ui.close();
                 }
                 ui.separator();
@@ -564,6 +658,16 @@ fn top_bar(app: &mut ScApp, ui: &mut Ui) {
                     app.open_terminal(app.active_pane);
                     ui.close();
                 }
+                if ui
+                    .button(format!(
+                        "Compare folders\t{}",
+                        app.settings.keymap.compare_folders.label()
+                    ))
+                    .clicked()
+                {
+                    app.open_compare();
+                    ui.close();
+                }
                 if ui.button("Plugin manager...").clicked() {
                     app.show_plugin_manager = true;
                     ui.close();
@@ -579,10 +683,18 @@ fn top_bar(app: &mut ScApp, ui: &mut Ui) {
                 // Command plugins.
                 let commands: Vec<(usize, String)> = {
                     let host = app.engine.plugins.read();
+                    let pane = app.active_pane;
+                    let names = app.panes[pane].tab().selected_names();
+                    let tab = app.panes[pane].tab();
+                    let ext = names
+                        .first()
+                        .and_then(|n| tab.snapshot.entries.iter().find(|e| e.name == *n))
+                        .map(|e| e.ext().to_ascii_lowercase())
+                        .unwrap_or_default();
                     host.plugins
                         .iter()
                         .enumerate()
-                        .filter(|(_, p)| p.is_command())
+                        .filter(|(_, p)| p.is_command() && (ext.is_empty() || p.handles_ext(&ext)))
                         .map(|(i, p)| {
                             (
                                 i,
@@ -855,6 +967,63 @@ fn paint_file_drop_target(ui: &Ui, rect: egui::Rect, accent: Color32, allowed: b
     } else {
         CursorIcon::Copy
     });
+}
+
+/// Badge that follows the pointer while an in-app file drag is held, so copy
+/// vs move (Ctrl) is obvious even when the OS cursor does not change.
+fn paint_file_drag_badge(app: &ScApp, ctx: &egui::Context) {
+    if !egui::DragAndDrop::has_payload_of_type::<FileDrag>(ctx) {
+        return;
+    }
+    let Some(pos) = ctx.pointer_hover_pos().or_else(|| ctx.pointer_interact_pos()) else {
+        return;
+    };
+    let is_move = ctx.input(|i| i.modifiers.ctrl || i.modifiers.command);
+    let count = egui::DragAndDrop::payload::<FileDrag>(ctx)
+        .map(|d| d.paths.len())
+        .unwrap_or(1);
+    ctx.request_repaint();
+
+    let noun = if count == 1 {
+        "item".to_string()
+    } else {
+        format!("{count} items")
+    };
+    let (title, glyph) = if is_move {
+        (format!("Move {noun}"), crate::icons::Glyph::Move)
+    } else {
+        (format!("Copy {noun}"), crate::icons::Glyph::Copy)
+    };
+    let accent = app.theme.accent;
+    let text = if is_move {
+        accent
+    } else {
+        app.theme.text_strong
+    };
+
+    egui::Area::new(egui::Id::new("file-drag-badge"))
+        .order(egui::Order::Tooltip)
+        .fixed_pos(pos + egui::vec2(18.0, 20.0))
+        .interactable(false)
+        .show(ctx, |ui| {
+            let mut frame = egui::Frame::popup(ui.style());
+            if is_move {
+                frame = frame.fill(accent.gamma_multiply(0.22));
+                frame = frame.stroke(egui::Stroke::new(1.0, accent));
+            }
+            frame.inner_margin(egui::Margin::symmetric(8, 5)).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    let (icon_rect, _) =
+                        ui.allocate_exact_size(egui::vec2(16.0, 16.0), Sense::hover());
+                    crate::icons::paint_glyph(ui.painter(), icon_rect, glyph, text);
+                    ui.label(RichText::new(title).strong().color(text));
+                });
+                if !is_move {
+                    ui.weak("Hold Ctrl to move");
+                }
+            });
+        });
 }
 
 fn tab_bar(app: &mut ScApp, ui: &mut Ui, pane: usize) {
@@ -1174,10 +1343,11 @@ fn address_bar(app: &mut ScApp, ui: &mut Ui, pane: usize) {
         {
             app.request_listing(pane, false);
         }
-        if crate::icons::button(ui, crate::icons::Glyph::Up, false, "Up (Backspace)").clicked()
-            && app.panes[pane].tab_mut().go_up()
-        {
-            app.request_listing(pane, false);
+        if crate::icons::button(ui, crate::icons::Glyph::Up, false, "Up (Backspace)").clicked() {
+            let recycle = sc_shell::recycle::is_recycle_path(&app.panes[pane].tab().path);
+            if !recycle && app.panes[pane].tab_mut().go_up() {
+                app.request_listing(pane, false);
+            }
         }
         if crate::icons::button(ui, crate::icons::Glyph::Refresh, false, "Refresh (F5)").clicked() {
             app.request_listing(pane, true);
@@ -1210,28 +1380,72 @@ fn address_bar(app: &mut ScApp, ui: &mut Ui, pane: usize) {
                 }
             }
         } else {
-            let mut shown = path.clone();
-            let mut output = TextEdit::singleline(&mut shown)
-                .id(egui::Id::new(("addr-bar", pane)))
-                .clip_text(true)
-                .desired_width(addr_w)
-                .show(ui);
-            let gained = output.response.gained_focus();
-            if gained || output.response.changed() {
-                let mut take = gained;
-                select_all_on_focus(ui, &mut output, &mut take);
+            let mut nav: Option<PathBuf> = None;
+            let mut new_tab: Option<PathBuf> = None;
+            let mut start_edit = false;
+            ui.allocate_ui_with_layout(
+                egui::vec2(addr_w, 22.0),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    let parts = breadcrumb_parts(&app.panes[pane].tab().path);
+                    ui.menu_button("▾", |ui| {
+                        for v in &app.volumes {
+                            if ui.button(v.root.display().to_string()).clicked() {
+                                nav = Some(v.root.clone());
+                                ui.close();
+                            }
+                        }
+                        if ui.button("Recycle Bin").clicked() {
+                            nav = Some(sc_shell::recycle::recycle_root());
+                            ui.close();
+                        }
+                        for (name, path) in sc_shell::volumes::wsl_distros() {
+                            if ui.button(format!("WSL: {name}")).clicked() {
+                                nav = Some(path);
+                                ui.close();
+                            }
+                        }
+                    });
+                    for (i, (label, dest)) in parts.iter().enumerate() {
+                        if i > 0 {
+                            ui.weak("›");
+                        }
+                        let r = ui.add(egui::Button::new(label).frame(false));
+                        if r.clicked() {
+                            nav = Some(dest.clone());
+                        }
+                        if r.middle_clicked() {
+                            new_tab = Some(dest.clone());
+                        }
+                    }
+                    let fill = ui.available_width().max(8.0);
+                    let r = ui.allocate_response(egui::vec2(fill, 20.0), Sense::click());
+                    if r.clicked() {
+                        start_edit = true;
+                    }
+                    r.on_hover_text("Click or Ctrl+L to edit path");
+                },
+            );
+            if start_edit {
                 app.address_edit = Some(AddressEdit {
                     pane,
-                    buffer: shown,
-                    focus_requested: gained,
+                    buffer: path.clone(),
+                    focus_requested: true,
                 });
+            }
+            if let Some(p) = new_tab {
+                app.open_folder_in_new_tab(pane, p);
+            } else if let Some(p) = nav {
+                app.navigate(pane, p);
             }
         }
 
         if commit {
             if let Some(edit) = app.address_edit.take() {
                 let dest = PathBuf::from(edit.buffer.trim());
-                if dest.is_dir() || crate::vfs::zip_listing(&dest).is_some() {
+                if sc_shell::recycle::is_recycle_path(&dest) {
+                    app.navigate(pane, sc_shell::recycle::recycle_root());
+                } else if dest.is_dir() || crate::vfs::zip_listing(&dest).is_some() {
                     app.navigate(pane, dest);
                 } else {
                     app.toast("Path not found".into(), true);
@@ -1357,6 +1571,7 @@ struct RowAction {
     open_new_tab: Option<PathBuf>,
     windows_menu: bool,
     row_menu_pos: Option<egui::Pos2>,
+    drop_into: Option<(Vec<PathBuf>, PathBuf, bool)>,
 }
 
 fn file_table(app: &mut ScApp, ui: &mut Ui, pane: usize) {
@@ -1406,6 +1621,7 @@ fn file_table(app: &mut ScApp, ui: &mut Ui, pane: usize) {
         open_new_tab: None,
         windows_menu: false,
         row_menu_pos: None,
+        drop_into: None,
     };
     let mut sort_click: Option<SortKey> = None;
     let mut rename_commit = false;
@@ -1439,6 +1655,8 @@ fn file_table(app: &mut ScApp, ui: &mut Ui, pane: usize) {
         || force_scroll;
     let table_rect = ui.max_rect();
     let mut row_got_secondary = false;
+    let mut dropped_on_dir = false;
+    let mut dir_drop_hover = false;
     {
         let n = view.len();
         let avail_height = ui.available_height();
@@ -1732,6 +1950,43 @@ fn file_table(app: &mut ScApp, ui: &mut Ui, pane: usize) {
 
                     // Row interactions.
                     let resp = row.response();
+                    if entry.is_dir() {
+                        if let Some(drag) = resp.dnd_hover_payload::<FileDrag>() {
+                            let dest = dir_path.join(&entry.name);
+                            let allowed = drop_allowed(&drag.paths, &dest);
+                            let color = if allowed {
+                                theme.accent
+                            } else {
+                                theme.error
+                            };
+                            resp.ctx.layer_painter(egui::LayerId::new(
+                                egui::Order::Foreground,
+                                egui::Id::new("dir-drop"),
+                            ))
+                            .rect_stroke(
+                                resp.rect,
+                                4.0,
+                                egui::Stroke::new(2.0, color),
+                                egui::StrokeKind::Inside,
+                            );
+                            resp.ctx.set_cursor_icon(if !allowed {
+                                CursorIcon::NotAllowed
+                            } else if resp.ctx.input(|i| i.modifiers.ctrl) {
+                                CursorIcon::Move
+                            } else {
+                                CursorIcon::Copy
+                            });
+                            dir_drop_hover = true;
+                        }
+                        if let Some(d) = dnd_release::<FileDrag>(&resp) {
+                            action.drop_into = Some((
+                                d.paths.clone(),
+                                dir_path.join(&entry.name),
+                                resp.ctx.input(|i| i.modifiers.ctrl),
+                            ));
+                            dropped_on_dir = true;
+                        }
+                    }
                     if resp.drag_started() {
                         let paths = if selected {
                             selection
@@ -1795,16 +2050,20 @@ fn file_table(app: &mut ScApp, ui: &mut Ui, pane: usize) {
         ui.id().with(("file-drop-zone", pane, tab_uid)),
         Sense::hover(),
     );
-    if let Some(drag) = drop_resp.dnd_hover_payload::<FileDrag>() {
-        paint_file_drop_target(
-            ui,
-            body_rect,
-            theme.accent,
-            drop_allowed(&drag.paths, &dir_path),
-        );
+    if !dir_drop_hover {
+        if let Some(drag) = drop_resp.dnd_hover_payload::<FileDrag>() {
+            paint_file_drop_target(
+                ui,
+                body_rect,
+                theme.accent,
+                drop_allowed(&drag.paths, &dir_path),
+            );
+        }
     }
-    if let Some(d) = dnd_release::<FileDrag>(&drop_resp) {
-        app.drop_files_into(d.paths.clone(), dir_path.clone(), drop_is_move(ui));
+    if !dropped_on_dir {
+        if let Some(d) = dnd_release::<FileDrag>(&drop_resp) {
+            app.drop_files_into(d.paths.clone(), dir_path.clone(), drop_is_move(ui));
+        }
     }
     let shift_held = ui.input(|i| i.modifiers.shift);
     let empty_secondary = ui.input(|i| i.pointer.button_clicked(egui::PointerButton::Secondary))
@@ -1820,6 +2079,9 @@ fn file_table(app: &mut ScApp, ui: &mut Ui, pane: usize) {
     }
 
     // ---- apply deferred actions (after the immutable borrow ends) ----
+    if let Some((sources, dest, is_move)) = action.drop_into {
+        app.drop_files_into(sources, dest, is_move);
+    }
     if let Some(key) = sort_click {
         app.sort_by(pane, key);
     }
@@ -1946,6 +2208,22 @@ fn row_context_menu(app: &mut ScApp, ui: &mut Ui, pane: usize, entry_index: u32)
         return false;
     };
     let full = dir.join(&entry.name);
+    if sc_shell::recycle::is_recycle_path(&dir) {
+        if ui.button("Restore").clicked() {
+            app.restore_recycle_names(&[entry.name.clone()]);
+            return true;
+        }
+        if ui.button("Delete permanently").clicked() {
+            app.delete_recycle_names(&[entry.name.clone()]);
+            return true;
+        }
+        if let Some(item) = app.recycle_meta.get(&entry.name) {
+            if let Some(orig) = &item.original_path {
+                ui.weak(orig.display().to_string());
+            }
+        }
+        return false;
+    }
     let in_zip = crate::vfs::split_zip_path(&dir).is_some()
         || crate::vfs::split_zip_path(&full).map(|(z, i)| !i.is_empty() && z != full).unwrap_or(false);
 
@@ -2082,11 +2360,12 @@ fn row_context_menu(app: &mut ScApp, ui: &mut Ui, pane: usize, entry_index: u32)
         }
         ui.separator();
         let commands: Vec<(usize, String)> = {
+            let ext = entry.ext().to_ascii_lowercase();
             let host = app.engine.plugins.read();
             host.plugins
                 .iter()
                 .enumerate()
-                .filter(|(_, p)| p.is_command())
+                .filter(|(_, p)| p.is_command() && p.handles_ext(&ext))
                 .map(|(i, p)| {
                     (
                         i,
@@ -2152,6 +2431,7 @@ fn pane_background_menu(app: &mut ScApp, ctx: &egui::Context) {
     let mut properties = false;
     let mut toggle_fav = false;
     let fav_path = app.panes[pane].tab().path.clone();
+    let in_recycle = sc_shell::recycle::is_recycle_path(&fav_path);
     let is_fav = app.is_favorite(&fav_path);
     let area = egui::Area::new(egui::Id::new("pane-bg-menu"))
         .order(egui::Order::Foreground)
@@ -2160,6 +2440,7 @@ fn pane_background_menu(app: &mut ScApp, ctx: &egui::Context) {
         .show(ctx, |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
                 ui.set_min_width(180.0);
+                if !in_recycle {
                 if ui
                     .button(format!("New folder\t{}", app.settings.keymap.new_folder.label()))
                     .clicked()
@@ -2183,6 +2464,7 @@ fn pane_background_menu(app: &mut ScApp, ctx: &egui::Context) {
                     close = true;
                 }
                 ui.separator();
+                }
                 let fav_label = if is_fav {
                     "Remove from favorites"
                 } else {
@@ -2238,7 +2520,8 @@ fn format_time(filetime: u64) -> String {
     if filetime == 0 {
         return String::new();
     }
-    let unix = sc_core::entry::filetime_to_unix_secs(filetime);
+    let local = sc_shell::enumerate::filetime_utc_to_local(filetime);
+    let unix = sc_core::entry::filetime_to_unix_secs(local);
     format_unix_time(unix)
 }
 
@@ -2272,6 +2555,30 @@ fn format_unix_time(unix: i64) -> String {
 
 // ---------------------------------------------------------------- panels
 
+fn breadcrumb_parts(path: &std::path::Path) -> Vec<(String, PathBuf)> {
+    if sc_shell::recycle::is_recycle_path(path) {
+        return vec![("Recycle Bin".into(), sc_shell::recycle::recycle_root())];
+    }
+    let mut parts = Vec::new();
+    let mut acc = PathBuf::new();
+    for (i, c) in path.components().enumerate() {
+        acc.push(c.as_os_str());
+        let label = if i == 0 {
+            acc.display().to_string()
+        } else {
+            c.as_os_str().to_string_lossy().into_owned()
+        };
+        if label.is_empty() {
+            continue;
+        }
+        parts.push((label, acc.clone()));
+    }
+    if parts.is_empty() {
+        parts.push((path.display().to_string(), path.to_path_buf()));
+    }
+    parts
+}
+
 fn ops_panel(app: &mut ScApp, ui: &mut Ui) {
     let has_active = app.ops_view.iter().any(|o| !o.finished);
     let has_errors = app.ops_view.iter().any(|o| o.error.is_some());
@@ -2280,54 +2587,113 @@ fn ops_panel(app: &mut ScApp, ui: &mut Ui) {
     }
     egui::Panel::bottom("ops").show(ui, |ui| {
         let mut clear_finished = false;
-        for op in app.ops_view.iter().filter(|o| !o.finished || o.error.is_some()) {
-            ui.horizontal(|ui| {
-                if let Some(err) = &op.error {
-                    ui.colored_label(app.theme.error, format!("{} — {}", op.label, err));
+        let mut pause_id: Option<u64> = None;
+        let mut resume_id: Option<u64> = None;
+        let mut cancel_id: Option<u64> = None;
+        let mut pause_all = false;
+        let mut resume_all = false;
+        let mut cancel_all = false;
+        let selected = app.ops_selected;
+        let rows: Vec<(u64, String, bool, Option<String>, f32, u64, u64, String, bool, f64)> = app
+            .ops_view
+            .iter()
+            .filter(|o| !o.finished || o.error.is_some())
+            .map(|op| {
+                let frac = if op.total_bytes > 0 {
+                    op.done_bytes as f32 / op.total_bytes as f32
+                } else if op.total_files > 0 {
+                    op.done_files as f32 / op.total_files as f32
                 } else {
-                    ui.label(&op.label);
-                    let frac = if op.total_bytes > 0 {
-                        op.done_bytes as f32 / op.total_bytes as f32
-                    } else if op.total_files > 0 {
-                        op.done_files as f32 / op.total_files as f32
-                    } else {
-                        0.0
-                    };
+                    0.0
+                };
+                (
+                    op.op_id,
+                    op.label.clone(),
+                    op.finished,
+                    op.error.clone(),
+                    frac,
+                    op.done_bytes,
+                    op.total_bytes,
+                    op.current.clone(),
+                    app.ops.is_paused(op.op_id),
+                    op.started.elapsed().as_secs_f64(),
+                )
+            })
+            .collect();
+        for (op_id, label, finished, error, frac, done_bytes, total_bytes, current, paused, elapsed) in rows {
+            ui.horizontal(|ui| {
+                let sel = selected == Some(op_id);
+                if ui.selectable_label(sel, "●").clicked() {
+                    app.ops_selected = Some(op_id);
+                }
+                if let Some(err) = error {
+                    ui.colored_label(app.theme.error, format!("{label} — {err}"));
+                } else {
+                    ui.label(&label);
                     ui.add(
                         egui::ProgressBar::new(frac)
                             .desired_width(220.0)
                             .text(format!(
                                 "{} / {}",
-                                format_size(op.done_bytes),
-                                format_size(op.total_bytes)
+                                format_size(done_bytes),
+                                format_size(total_bytes)
                             )),
                     );
-                    let elapsed = op.started.elapsed().as_secs_f64();
-                    if elapsed > 0.5 && op.done_bytes > 0 {
-                        let speed = op.done_bytes as f64 / elapsed;
+                    ui.weak(&current);
+                    if elapsed > 0.5 && done_bytes > 0 {
+                        let speed = done_bytes as f64 / elapsed;
                         ui.weak(format!("{}/s", format_size(speed as u64)));
                     }
-                    ui.weak(&op.current);
+                    if !finished {
+                        if paused {
+                            if ui.small_button("Resume").clicked() {
+                                resume_id = Some(op_id);
+                            }
+                        } else if ui.small_button("Pause").clicked() {
+                            pause_id = Some(op_id);
+                        }
+                        if ui.small_button("Cancel").clicked() {
+                            cancel_id = Some(op_id);
+                        }
+                    }
                 }
             });
         }
         ui.horizontal(|ui| {
             if has_active {
-                if app.ops.is_paused() {
-                    if ui.button("Resume").clicked() {
-                        app.ops.resume();
+                if app.ops.any_paused() {
+                    if ui.button("Resume all").clicked() {
+                        resume_all = true;
                     }
-                } else if ui.button("Pause").clicked() {
-                    app.ops.pause();
+                } else if ui.button("Pause all").clicked() {
+                    pause_all = true;
                 }
-                if ui.button("Cancel").clicked() {
-                    app.ops.cancel();
+                if ui.button("Cancel all").clicked() {
+                    cancel_all = true;
                 }
             }
             if has_errors && ui.button("Dismiss errors").clicked() {
                 clear_finished = true;
             }
         });
+        if let Some(id) = pause_id {
+            app.ops.pause(id);
+        }
+        if let Some(id) = resume_id {
+            app.ops.resume(id);
+        }
+        if let Some(id) = cancel_id {
+            app.ops.cancel(id);
+        }
+        if pause_all {
+            app.ops.pause_all();
+        }
+        if resume_all {
+            app.ops.resume_all();
+        }
+        if cancel_all {
+            app.ops.cancel_all();
+        }
         if clear_finished {
             app.ops_view.retain(|o| !o.finished);
         }
@@ -2384,6 +2750,15 @@ fn status_bar(app: &mut ScApp, ui: &mut Ui) {
             left.push_str(&format!("  ·  {sel} selected ({})", format_size(sel_bytes)));
             if loading {
                 left.push_str("  ·  loading…");
+            }
+            if sc_shell::recycle::is_recycle_path(&path) {
+                if let Some(name) = picked.first().map(|(_, _, n)| n.clone()) {
+                    if let Some(item) = app.recycle_meta.get(&name) {
+                        if let Some(orig) = &item.original_path {
+                            left.push_str(&format!("  ·  from {}", orig.display()));
+                        }
+                    }
+                }
             }
             ui.label(left);
 

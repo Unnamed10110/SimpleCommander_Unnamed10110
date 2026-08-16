@@ -2,7 +2,7 @@
 //! and are written to settings.toml.
 
 use crate::app::{replace_cmdline_program, ScApp};
-use crate::config::{ColorRule, ConflictDefault, DefaultLayout};
+use crate::config::{ColorRule, ConflictDefault, DefaultLayout, PreviewPlacement};
 use crate::keymap::{Keymap, SHORTCUT_ROWS};
 use crate::theme;
 use egui::{Align2, Color32, Slider, TextEdit};
@@ -91,44 +91,31 @@ fn appearance_page(
     ui.add_space(6.0);
 
     ui.label("Theme");
-    ui.horizontal(|ui| {
-        if ui
-            .radio(app.settings.session.theme != "dark", "AMOLED (pure black)")
-            .clicked()
-        {
-            app.set_theme("amoled");
+    for (id, label) in theme::catalog() {
+        let selected = if *id == "amoled" {
+            theme::is_amoled(&app.settings.session.theme)
+        } else {
+            app.settings.session.theme == *id
+        };
+        if ui.radio(selected, *label).clicked() {
+            app.set_theme(id);
             *persist = true;
             *appearance = true;
         }
-        if ui.radio(app.settings.session.theme == "dark", "Dark").clicked() {
-            app.set_theme("dark");
-            *persist = true;
-            *appearance = true;
-        }
-    });
+    }
     ui.add_space(8.0);
 
-    ui.label("Accent color");
-    ui.horizontal(|ui| {
-        let mut rgb = theme::parse_hex(&app.settings.accent)
-            .map(|c| [c.r(), c.g(), c.b()])
-            .unwrap_or([app.theme.accent.r(), app.theme.accent.g(), app.theme.accent.b()]);
-        if ui.color_edit_button_srgb(&mut rgb).changed() {
-            app.settings.accent = theme::hex_of(Color32::from_rgb(rgb[0], rgb[1], rgb[2]));
-            *persist = true;
-            *appearance = true;
-        }
-        ui.weak(if app.settings.accent.is_empty() {
-            "theme default".into()
-        } else {
-            format!("#{}", app.settings.accent)
-        });
-        if !app.settings.accent.is_empty() && ui.small_button("Reset").clicked() {
-            app.settings.accent.clear();
-            *persist = true;
-            *appearance = true;
-        }
+    ui.label(if theme::is_amoled(&app.settings.session.theme) {
+        "AMOLED color"
+    } else {
+        "Accent color"
     });
+    let mut hex = app.settings.accent.clone();
+    if theme::accent_editor(ui, &mut hex, app.theme.accent) {
+        app.set_accent(&hex);
+        *persist = true;
+        *appearance = true;
+    }
     ui.add_space(8.0);
 
     ui.label("UI scale");
@@ -164,6 +151,20 @@ fn appearance_page(
     {
         *persist = true;
         *rebuild = true;
+    }
+
+    ui.add_space(8.0);
+    ui.label("Preview pane");
+    let place = app.settings.preview_placement;
+    for opt in [
+        PreviewPlacement::Floating,
+        PreviewPlacement::Right,
+        PreviewPlacement::Bottom,
+    ] {
+        if ui.radio(place == opt, opt.label()).clicked() {
+            app.settings.preview_placement = opt;
+            *persist = true;
+        }
     }
 }
 
@@ -409,6 +410,19 @@ fn ops_page(app: &mut ScApp, ui: &mut egui::Ui, persist: &mut bool) {
             *persist = true;
         }
     }
+
+    ui.add_space(10.0);
+    ui.label("Parallel transfers");
+    let mut jobs = app.settings.transfer_jobs.clamp(1, 4);
+    if ui
+        .add(egui::Slider::new(&mut jobs, 1..=4).text("worker threads"))
+        .changed()
+    {
+        app.settings.transfer_jobs = jobs;
+        app.ops.set_max_jobs(jobs as usize);
+        *persist = true;
+    }
+    ui.weak("1 is strictly sequential. Overlapping paths still wait their turn.");
 }
 
 fn search_page(app: &mut ScApp, ui: &mut egui::Ui, persist: &mut bool) {

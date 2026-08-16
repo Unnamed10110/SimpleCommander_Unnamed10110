@@ -12,10 +12,11 @@ use egui::TextureHandle;
 use sc_core::snapshot::DirSnapshot;
 use sc_core::sort::{SortKey, SortSpec};
 use sc_core::state::{PaneLayout, PaneState, Session, SessionPane, SessionTab, SplitDirection, TabState};
-use sc_ops::queue::{ConflictResolution, OpEngine, OpEvent, Operation};
+use sc_ops::queue::{ConflictResolution, OpEngine, OpEvent, OpOrigin, Operation};
 use sc_ops::undo::UndoJournal;
+use sc_shell::recycle::RecycleItem;
 use sc_shell::watcher::DirWatcher;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -63,6 +64,7 @@ pub struct OpView {
 }
 
 pub struct ConflictPrompt {
+    pub op_id: u64,
     pub source: PathBuf,
     pub dest: PathBuf,
     pub apply_to_all: bool,
@@ -191,7 +193,12 @@ pub struct ScApp {
     pub folder_size_pending: HashSet<PathBuf>,
 
     pub ops_view: Vec<OpView>,
+    pub ops_selected: Option<u64>,
     pub conflict: Option<ConflictPrompt>,
+    pub conflict_queue: VecDeque<ConflictPrompt>,
+    pub pending_ops: HashMap<u64, Operation>,
+    pub recycle_meta: HashMap<String, RecycleItem>,
+    pub compare: crate::compare::FolderCompareState,
     pub pending_delete: Option<(Vec<PathBuf>, bool)>, // (paths, permanent)
     pub rename: Option<RenameState>,
     pub search: SearchState,
@@ -236,6 +243,8 @@ pub struct ScApp {
     pub split_ratio: f32,
     /// Width of the navigation sidebar in points.
     pub sidebar_width: f32,
+    pub preview_width: f32,
+    pub preview_height: f32,
     /// Right-click on empty pane space: (pane, pointer pos).
     pub pane_bg_menu: Option<(usize, egui::Pos2)>,
     /// Right-click on a file row: (pane, entry index, pointer pos).
@@ -278,6 +287,11 @@ impl ScApp {
 
         let ctx = cc.egui_ctx.clone();
         let ops = OpEngine::new(move || ctx.request_repaint());
+        ops.set_max_jobs(settings.transfer_jobs.clamp(1, 4) as usize);
+        let hook_plugins = engine.plugins.clone();
+        ops.set_hooks(Arc::new(move |event, sources, dests| {
+            hook_plugins.read().run_hooks(event, sources, dests);
+        }));
 
         let mut panes: Vec<PaneState> = session
             .panes
@@ -328,7 +342,12 @@ impl ScApp {
             folder_sizes: HashMap::new(),
             folder_size_pending: HashSet::new(),
             ops_view: Vec::new(),
+            ops_selected: None,
             conflict: None,
+            conflict_queue: VecDeque::new(),
+            pending_ops: HashMap::new(),
+            recycle_meta: HashMap::new(),
+            compare: crate::compare::FolderCompareState::default(),
             pending_delete: None,
             rename: None,
             search: SearchState {
@@ -413,6 +432,8 @@ impl ScApp {
             drag_active: false,
             split_ratio: session.split_ratio.clamp(0.15, 0.85),
             sidebar_width: session.sidebar_width.clamp(140.0, 480.0),
+            preview_width: session.preview_width.clamp(200.0, 800.0),
+            preview_height: session.preview_height.clamp(140.0, 600.0),
             pane_bg_menu: None,
             row_ctx_menu: None,
             capture_shortcut: None,
@@ -471,7 +492,7 @@ impl ScApp {
         let path = tab.path.clone();
         let subtree = tab.flatten;
         // No watcher inside archives.
-        if crate::vfs::zip_listing(&path).is_some() {
+        if crate::vfs::zip_listing(&path).is_some() || sc_shell::recycle::is_recycle_path(&path) {
             self.watchers.remove(&key);
             return;
         }
@@ -495,6 +516,7 @@ impl ScApp {
     }
 
     pub fn navigate(&mut self, pane: usize, to: PathBuf) {
+        self.remember_unc(&to);
         let tab = self.panes[pane].tab_mut();
         if tab.locked && tab.path != to {
             // Locked tabs open navigation in a new tab (XYplorer behavior).
@@ -505,6 +527,82 @@ impl ScApp {
         }
         tab.navigate(to);
         self.request_listing(pane, false);
+    }
+
+    fn remember_unc(&mut self, path: &Path) {
+        let s = path.to_string_lossy();
+        if !s.starts_with("\\\\") {
+            return;
+        }
+        // Keep the share root (`\\server\share`).
+        let mut comps = path.components();
+        let prefix = comps.next();
+        let server = comps.next();
+        let share = comps.next();
+        let root = match (prefix, server, share) {
+            (Some(_), Some(srv), Some(sh)) => {
+                PathBuf::from(format!(r"\\{}\{}", srv.as_os_str().to_string_lossy(), sh.as_os_str().to_string_lossy()))
+            }
+            _ => path.to_path_buf(),
+        };
+        let roots = &mut self.settings.session.unc_roots;
+        if !roots.iter().any(|p| p == &root) {
+            roots.push(root);
+            if roots.len() > 24 {
+                roots.remove(0);
+            }
+        }
+    }
+
+    pub fn submit_op(&mut self, op: Operation) {
+        self.submit_op_origin(op, OpOrigin::User);
+    }
+
+    pub fn submit_op_origin(&mut self, op: Operation, origin: OpOrigin) {
+        let id = self.ops.submit_origin(op.clone(), origin);
+        self.pending_ops.insert(id, op);
+    }
+
+    pub fn undo(&mut self) {
+        for op in self.undo.pop_undo() {
+            self.submit_op_origin(op, OpOrigin::Undo);
+        }
+    }
+
+    pub fn redo(&mut self) {
+        for op in self.undo.pop_redo() {
+            self.submit_op_origin(op, OpOrigin::Redo);
+        }
+    }
+
+    pub fn open_compare(&mut self) {
+        if !matches!(self.layout, PaneLayout::Dual(_)) {
+            self.toast("Compare folders needs a dual-pane layout".into(), true);
+            return;
+        }
+        let left = self.panes[0].tab().path.clone();
+        let right = self.panes[1].tab().path.clone();
+        if sc_shell::recycle::is_recycle_path(&left) || sc_shell::recycle::is_recycle_path(&right) {
+            self.toast("Cannot compare the Recycle Bin".into(), true);
+            return;
+        }
+        self.compare.open = true;
+        self.compare.left = left;
+        self.compare.right = right;
+        self.compare.rows.clear();
+        self.compare.selected.clear();
+        self.run_compare();
+    }
+
+    pub fn run_compare(&mut self) {
+        self.compare.query_id = self.compare.query_id.wrapping_add(1);
+        self.compare.running = true;
+        self.engine.submit(Job::CompareFolders {
+            query_id: self.compare.query_id,
+            left: self.compare.left.clone(),
+            right: self.compare.right.clone(),
+            recursive: self.compare.include_subfolders,
+        });
     }
 
     pub fn open_folder_in_new_tab(&mut self, pane: usize, path: PathBuf) {
@@ -526,9 +624,11 @@ impl ScApp {
 
     fn begin_new_item(&mut self, pane: usize, is_folder: bool) {
         let tab = self.panes[pane].tab();
-        if crate::vfs::split_zip_path(&tab.path).is_some() {
+        if crate::vfs::split_zip_path(&tab.path).is_some() || sc_shell::recycle::is_recycle_path(&tab.path) {
             self.toast(
-                if is_folder {
+                if sc_shell::recycle::is_recycle_path(&tab.path) {
+                    "Can't create items in the Recycle Bin".into()
+                } else if is_folder {
                     "Can't create a folder inside a zip".into()
                 } else {
                     "Can't create a file inside a zip".into()
@@ -585,9 +685,9 @@ impl ScApp {
         self.force_scroll_tab = Some(uid);
         self.new_item = None;
         if is_folder {
-            self.ops.submit(Operation::NewFolder { path: dest });
+            self.submit_op(Operation::NewFolder { path: dest });
         } else {
-            self.ops.submit(Operation::NewFile { path: dest });
+            self.submit_op(Operation::NewFile { path: dest });
         }
     }
 
@@ -930,12 +1030,25 @@ impl ScApp {
                 self.tree_pending.remove(&path);
                 self.tree_children.insert(path, dirs);
             }
+            UiMsg::RecycleMeta { items } => {
+                self.recycle_meta.clear();
+                for item in items {
+                    self.recycle_meta.insert(item.name.clone(), item);
+                }
+            }
+            UiMsg::CompareResult { query_id, rows } => {
+                if query_id == self.compare.query_id {
+                    self.compare.rows = rows;
+                    self.compare.running = false;
+                    self.compare.selected.clear();
+                }
+            }
         }
     }
 
     fn handle_op_event(&mut self, ev: OpEvent) {
         match ev {
-            OpEvent::Started { op_id, label, total_bytes, total_files } => {
+            OpEvent::Started { op_id, origin: _, label, total_bytes, total_files } => {
                 self.ops_view.push(OpView {
                     op_id,
                     label,
@@ -948,6 +1061,9 @@ impl ScApp {
                     error: None,
                     started: Instant::now(),
                 });
+                if self.ops_selected.is_none() {
+                    self.ops_selected = Some(op_id);
+                }
                 if self.ops_view.len() > 12 {
                     self.ops_view.retain(|o| !o.finished || o.error.is_some());
                 }
@@ -961,40 +1077,50 @@ impl ScApp {
                     v.current = current;
                 }
             }
-            OpEvent::Conflict { op_id: _, source, dest } => {
+            OpEvent::Conflict { op_id, source, dest } => {
+                let prompt = ConflictPrompt { op_id, source, dest, apply_to_all: false };
                 match self.settings.conflict_default {
                     ConflictDefault::Ask => {
-                        self.conflict = Some(ConflictPrompt { source, dest, apply_to_all: false });
+                        if self.conflict.is_some() {
+                            self.conflict_queue.push_back(prompt);
+                        } else {
+                            self.conflict = Some(prompt);
+                        }
                     }
                     ConflictDefault::Overwrite => {
-                        self.ops.resolve_conflict(ConflictResolution::Overwrite, true);
+                        self.ops.resolve_conflict(op_id, ConflictResolution::Overwrite, true);
                     }
                     ConflictDefault::KeepBoth => {
-                        self.ops.resolve_conflict(ConflictResolution::AutoRename, true);
+                        self.ops.resolve_conflict(op_id, ConflictResolution::AutoRename, true);
                     }
                     ConflictDefault::Skip => {
-                        self.ops.resolve_conflict(ConflictResolution::Skip, true);
+                        self.ops.resolve_conflict(op_id, ConflictResolution::Skip, true);
                     }
                 }
             }
-            OpEvent::Done { op_id, undo, refresh, created } => {
+            OpEvent::Done { op_id, origin, undo, refresh, created } => {
                 if let Some(v) = self.ops_view.iter_mut().find(|o| o.op_id == op_id) {
                     v.finished = true;
                 }
-                if let Some(u) = undo {
-                    self.undo.record(u);
+                let original = self.pending_ops.remove(&op_id);
+                if origin == OpOrigin::User {
+                    if let Some(u) = undo {
+                        self.undo.record(u, original.into_iter().collect());
+                    }
                 }
                 self.select_created_items(created);
                 self.refresh_all_matching(&refresh);
             }
-            OpEvent::Failed { op_id, error } => {
+            OpEvent::Failed { op_id, origin: _, error } => {
+                self.pending_ops.remove(&op_id);
                 if let Some(v) = self.ops_view.iter_mut().find(|o| o.op_id == op_id) {
                     v.finished = true;
                     v.error = Some(error.clone());
                 }
                 self.toast(format!("Operation failed: {error}"), true);
             }
-            OpEvent::Cancelled { op_id } => {
+            OpEvent::Cancelled { op_id, origin: _ } => {
+                self.pending_ops.remove(&op_id);
                 if let Some(v) = self.ops_view.iter_mut().find(|o| o.op_id == op_id) {
                     v.finished = true;
                     v.error = Some("cancelled".into());
@@ -1012,6 +1138,14 @@ impl ScApp {
     /// Open an entry: navigate for dirs, shell-open for files (zip-aware).
     pub fn open_entry(&mut self, pane: usize, entry_index: u32) {
         let tab = self.panes[pane].tab();
+        if sc_shell::recycle::is_recycle_path(&tab.path) {
+            let Some(entry) = tab.snapshot.entries.get(entry_index as usize) else {
+                return;
+            };
+            let name = entry.name.clone();
+            self.restore_recycle_names(&[name]);
+            return;
+        }
         let Some(entry) = tab.snapshot.entries.get(entry_index as usize) else {
             return;
         };
@@ -1090,6 +1224,10 @@ impl ScApp {
     }
 
     pub fn paste_into(&mut self, pane: usize) {
+        if sc_shell::recycle::is_recycle_path(&self.panes[pane].tab().path) {
+            self.toast("Can't paste into the Recycle Bin".into(), true);
+            return;
+        }
         let Some((paths, is_cut)) = sc_shell::clipboard::get_clipboard_files() else {
             return;
         };
@@ -1107,6 +1245,10 @@ impl ScApp {
             self.toast("Cannot drop into a zip archive".into(), true);
             return;
         }
+        if sc_shell::recycle::is_recycle_path(&dest) {
+            self.toast("Cannot drop into the Recycle Bin".into(), true);
+            return;
+        }
         let sources: Vec<PathBuf> = sources
             .into_iter()
             .filter(|p| p.parent() != Some(dest.as_path()))
@@ -1120,7 +1262,7 @@ impl ScApp {
         } else {
             Operation::Copy { sources, dest_dir: dest }
         };
-        self.ops.submit(op);
+        self.submit_op(op);
     }
 
     /// Copy or move selection to the other pane (F5/F6 commander-style).
@@ -1168,11 +1310,20 @@ impl ScApp {
         } else {
             Operation::Copy { sources, dest_dir: dest }
         };
-        self.ops.submit(op);
+        self.submit_op(op);
     }
 
     pub fn delete_selection(&mut self, pane: usize, shift_permanent: bool) {
-        let paths = self.panes[pane].tab().selected_paths();
+        let tab = self.panes[pane].tab();
+        if sc_shell::recycle::is_recycle_path(&tab.path) {
+            let names = tab.selected_names();
+            if names.is_empty() {
+                return;
+            }
+            self.delete_recycle_names(&names);
+            return;
+        }
+        let paths = tab.selected_paths();
         if paths.is_empty() {
             return;
         }
@@ -1185,11 +1336,14 @@ impl ScApp {
         if confirm {
             self.pending_delete = Some((paths, permanent));
         } else {
-            self.ops.submit(Operation::Delete { paths, recycle: !permanent });
+            self.submit_op(Operation::Delete { paths, recycle: !permanent });
         }
     }
 
     pub fn start_rename(&mut self, pane: usize) {
+        if sc_shell::recycle::is_recycle_path(&self.panes[pane].tab().path) {
+            return;
+        }
         let tab = self.panes[pane].tab();
         let Some(&idx) = tab.selection.iter().next() else { return };
         let Some(entry) = tab.snapshot.entries.get(idx as usize) else { return };
@@ -1215,7 +1369,7 @@ impl ScApp {
         }
         let from = tab.path.join(&entry.name);
         let to = tab.path.join(new_name);
-        self.ops.submit(Operation::Rename { from, to });
+        self.submit_op(Operation::Rename { from, to });
     }
 
     pub fn request_preview(&mut self, path: Option<PathBuf>) {
@@ -1287,8 +1441,15 @@ impl ScApp {
         if self.pending_delete.take().is_some() {
             dismissed = true;
         }
-        if self.conflict.take().is_some() {
-            self.ops.resolve_conflict(ConflictResolution::Cancel, false);
+        if let Some(c) = self.conflict.take() {
+            self.ops.resolve_conflict(c.op_id, ConflictResolution::Cancel, false);
+            while let Some(c) = self.conflict_queue.pop_front() {
+                self.ops.resolve_conflict(c.op_id, ConflictResolution::Cancel, false);
+            }
+            dismissed = true;
+        }
+        if self.compare.open {
+            self.compare.open = false;
             dismissed = true;
         }
         if self.row_ctx_menu.take().is_some() {
@@ -1382,6 +1543,49 @@ impl ScApp {
         }
     }
 
+    pub fn restore_recycle_names(&mut self, names: &[String]) {
+        let mut parsing = Vec::new();
+        let mut refresh = Vec::new();
+        for n in names {
+            if let Some(item) = self.recycle_meta.get(n) {
+                parsing.push(item.parsing_name.clone());
+                if let Some(orig) = &item.original_path {
+                    if let Some(parent) = orig.parent() {
+                        refresh.push(parent.to_path_buf());
+                    }
+                }
+            }
+        }
+        if parsing.is_empty() {
+            self.toast("Nothing to restore".into(), true);
+            return;
+        }
+        self.submit_op(Operation::RecycleRestore {
+            parsing_names: parsing,
+            refresh,
+        });
+    }
+
+    pub fn delete_recycle_names(&mut self, names: &[String]) {
+        let parsing: Vec<String> = names
+            .iter()
+            .filter_map(|n| self.recycle_meta.get(n).map(|i| i.parsing_name.clone()))
+            .collect();
+        if parsing.is_empty() {
+            return;
+        }
+        self.submit_op(Operation::RecycleDelete {
+            parsing_names: parsing,
+        });
+    }
+
+    pub fn answer_conflict(&mut self, res: ConflictResolution, apply_to_all: bool) {
+        if let Some(c) = self.conflict.take() {
+            self.ops.resolve_conflict(c.op_id, res, apply_to_all);
+        }
+        self.conflict = self.conflict_queue.pop_front();
+    }
+
     // ----- session ---------------------------------------------------------
 
     pub fn session_snapshot(&self) -> Session {
@@ -1412,6 +1616,11 @@ impl ScApp {
             window: None,
             split_ratio: self.split_ratio,
             sidebar_width: self.sidebar_width,
+            preview_width: self.preview_width,
+            preview_height: self.preview_height,
+            unc_roots: self.settings.session.unc_roots.clone(),
+            sidebar_wsl_open: self.settings.session.sidebar_wsl_open,
+            sidebar_network_open: self.settings.session.sidebar_network_open,
             sidebar_favorites_open: self.settings.session.sidebar_favorites_open,
             sidebar_drives_open: self.settings.session.sidebar_drives_open,
             sidebar_user_folders_open: self.settings.session.sidebar_user_folders_open,
@@ -1451,6 +1660,15 @@ impl ScApp {
     pub fn set_theme(&mut self, name: &str) {
         self.settings.session.theme = name.to_string();
         self.theme = theme::by_name(name);
+        theme::apply_accent_override(&mut self.theme, &self.settings.accent);
+    }
+
+    pub fn set_accent(&mut self, hex: &str) {
+        self.settings.accent = hex.trim().trim_start_matches('#').to_string();
+        if theme::is_amoled(&self.settings.session.theme) {
+            self.settings.session.theme = "amoled".into();
+        }
+        self.theme = theme::by_name(&self.settings.session.theme);
         theme::apply_accent_override(&mut self.theme, &self.settings.accent);
     }
 

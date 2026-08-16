@@ -5512,6 +5512,7 @@ dependencies = [
  "crossbeam-channel",
  "parking_lot",
  "sc-core",
+ "sc-shell",
  "windows 0.62.2",
 ]
 

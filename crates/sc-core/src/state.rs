@@ -329,6 +329,18 @@ pub struct Session {
     /// Width of the navigation sidebar in points.
     #[serde(default = "default_sidebar_width")]
     pub sidebar_width: f32,
+    /// Docked preview pane size.
+    #[serde(default = "default_preview_width")]
+    pub preview_width: f32,
+    #[serde(default = "default_preview_height")]
+    pub preview_height: f32,
+    /// Remembered UNC roots shown in the Network sidebar.
+    #[serde(default)]
+    pub unc_roots: Vec<PathBuf>,
+    #[serde(default = "default_true")]
+    pub sidebar_wsl_open: bool,
+    #[serde(default = "default_true")]
+    pub sidebar_network_open: bool,
 }
 
 fn default_split_ratio() -> f32 {
@@ -337,6 +349,14 @@ fn default_split_ratio() -> f32 {
 
 fn default_sidebar_width() -> f32 {
     210.0
+}
+
+fn default_preview_width() -> f32 {
+    360.0
+}
+
+fn default_preview_height() -> f32 {
+    240.0
 }
 
 fn default_true() -> bool {
@@ -387,6 +407,11 @@ impl Default for Session {
             sidebar_tree_open: true,
             tree_expanded: Vec::new(),
             sidebar_width: 210.0,
+            preview_width: 360.0,
+            preview_height: 240.0,
+            unc_roots: Vec::new(),
+            sidebar_wsl_open: true,
+            sidebar_network_open: true,
         }
     }
 }

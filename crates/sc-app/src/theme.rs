@@ -1,12 +1,12 @@
-//! Token-based theming. The flagship "AMOLED" theme uses pure #000000
-//! surfaces everywhere (true black for OLED panels), hairline separators,
-//! and a single configurable accent.
+//! Token-based theming. AMOLED palettes use pure #000000 surfaces
+//! (true black for OLED panels). Light palettes use Visuals::light().
 
 use egui::{Color32, CornerRadius, Stroke, Visuals};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Theme {
     pub name: &'static str,
+    pub dark: bool,
     pub bg: Color32,
     pub panel: Color32,
     pub header: Color32,
@@ -27,6 +27,7 @@ pub struct Theme {
 
 pub const AMOLED: Theme = Theme {
     name: "amoled",
+    dark: true,
     bg: Color32::BLACK,
     panel: Color32::BLACK,
     header: Color32::BLACK,
@@ -45,8 +46,51 @@ pub const AMOLED: Theme = Theme {
     ok: Color32::from_rgb(0x51, 0xd8, 0x8a),
 };
 
+pub const AMOLED_AMBER: Theme = Theme {
+    name: "amoled_amber",
+    dark: true,
+    bg: Color32::BLACK,
+    panel: Color32::BLACK,
+    header: Color32::BLACK,
+    separator: Color32::from_rgb(0x22, 0x18, 0x0a),
+    text: Color32::from_rgb(0xe8, 0xdc, 0xc8),
+    text_weak: Color32::from_rgb(0x9a, 0x86, 0x68),
+    text_strong: Color32::from_rgb(0xff, 0xf4, 0xe0),
+    accent: Color32::from_rgb(0xff, 0xb0, 0x20),
+    accent_dim: Color32::from_rgb(0x6a, 0x42, 0x08),
+    selection_bg: Color32::from_rgb(0x2a, 0x18, 0x00),
+    hover_bg: Color32::from_rgb(0x12, 0x0c, 0x06),
+    stripe: Color32::from_rgb(0x0a, 0x07, 0x03),
+    folder: Color32::from_rgb(0xff, 0xd8, 0x66),
+    error: Color32::from_rgb(0xff, 0x6b, 0x5c),
+    warn: Color32::from_rgb(0xff, 0xb8, 0x4d),
+    ok: Color32::from_rgb(0x7a, 0xd8, 0x6a),
+};
+
+pub const AMOLED_VIOLET: Theme = Theme {
+    name: "amoled_violet",
+    dark: true,
+    bg: Color32::BLACK,
+    panel: Color32::BLACK,
+    header: Color32::BLACK,
+    separator: Color32::from_rgb(0x1c, 0x12, 0x28),
+    text: Color32::from_rgb(0xdc, 0xd4, 0xea),
+    text_weak: Color32::from_rgb(0x8a, 0x7c, 0xa0),
+    text_strong: Color32::from_rgb(0xf6, 0xf0, 0xff),
+    accent: Color32::from_rgb(0xc4, 0x84, 0xfc),
+    accent_dim: Color32::from_rgb(0x4c, 0x1d, 0x95),
+    selection_bg: Color32::from_rgb(0x1e, 0x0a, 0x3a),
+    hover_bg: Color32::from_rgb(0x10, 0x08, 0x18),
+    stripe: Color32::from_rgb(0x08, 0x04, 0x0c),
+    folder: Color32::from_rgb(0xff, 0xd8, 0x66),
+    error: Color32::from_rgb(0xff, 0x6b, 0x8a),
+    warn: Color32::from_rgb(0xff, 0xb8, 0x4d),
+    ok: Color32::from_rgb(0x5e, 0xe0, 0xb0),
+};
+
 pub const DARK: Theme = Theme {
     name: "dark",
+    dark: true,
     bg: Color32::from_rgb(0x1b, 0x1d, 0x1f),
     panel: Color32::from_rgb(0x20, 0x22, 0x25),
     header: Color32::from_rgb(0x25, 0x27, 0x2a),
@@ -65,9 +109,81 @@ pub const DARK: Theme = Theme {
     ok: Color32::from_rgb(0x51, 0xd8, 0x8a),
 };
 
+pub const LIGHT: Theme = Theme {
+    name: "light",
+    dark: false,
+    bg: Color32::from_rgb(0xf4, 0xf6, 0xf8),
+    panel: Color32::from_rgb(0xff, 0xff, 0xff),
+    header: Color32::from_rgb(0xec, 0xef, 0xf3),
+    separator: Color32::from_rgb(0xd0, 0xd5, 0xdc),
+    text: Color32::from_rgb(0x1c, 0x1f, 0x24),
+    text_weak: Color32::from_rgb(0x6b, 0x72, 0x80),
+    text_strong: Color32::from_rgb(0x0b, 0x0d, 0x10),
+    accent: Color32::from_rgb(0x1d, 0x6b, 0xe0),
+    accent_dim: Color32::from_rgb(0xa8, 0xc8, 0xf0),
+    selection_bg: Color32::from_rgb(0xd6, 0xe6, 0xfb),
+    hover_bg: Color32::from_rgb(0xe8, 0xec, 0xf1),
+    stripe: Color32::from_rgb(0xee, 0xf1, 0xf5),
+    folder: Color32::from_rgb(0xc9, 0x8a, 0x1a),
+    error: Color32::from_rgb(0xdc, 0x26, 0x26),
+    warn: Color32::from_rgb(0xd9, 0x77, 0x06),
+    ok: Color32::from_rgb(0x05, 0x96, 0x69),
+};
+
+pub const LIGHT_WARM: Theme = Theme {
+    name: "light_warm",
+    dark: false,
+    bg: Color32::from_rgb(0xf7, 0xf1, 0xe8),
+    panel: Color32::from_rgb(0xff, 0xfb, 0xf5),
+    header: Color32::from_rgb(0xf0, 0xe6, 0xd6),
+    separator: Color32::from_rgb(0xdf, 0xd2, 0xbe),
+    text: Color32::from_rgb(0x2c, 0x24, 0x18),
+    text_weak: Color32::from_rgb(0x7a, 0x6a, 0x56),
+    text_strong: Color32::from_rgb(0x1a, 0x12, 0x0a),
+    accent: Color32::from_rgb(0xc4, 0x5c, 0x26),
+    accent_dim: Color32::from_rgb(0xe8, 0xb8, 0x98),
+    selection_bg: Color32::from_rgb(0xf5, 0xdc, 0xc8),
+    hover_bg: Color32::from_rgb(0xef, 0xe4, 0xd4),
+    stripe: Color32::from_rgb(0xf3, 0xea, 0xdc),
+    folder: Color32::from_rgb(0xb4, 0x53, 0x09),
+    error: Color32::from_rgb(0xb9, 0x1c, 0x1c),
+    warn: Color32::from_rgb(0xb4, 0x53, 0x09),
+    ok: Color32::from_rgb(0x04, 0x78, 0x57),
+};
+
+/// `(id, label)` pairs shown in View → Theme and Settings → Appearance.
+pub fn catalog() -> &'static [(&'static str, &'static str)] {
+    &[
+        ("amoled", "AMOLED"),
+        ("dark", "Dark"),
+        ("light", "Light"),
+        ("light_warm", "Light Warm"),
+    ]
+}
+
+pub fn is_amoled(name: &str) -> bool {
+    name.starts_with("amoled")
+}
+
+/// Named accent chips shown next to AMOLED (and usable on any theme).
+pub const ACCENT_PRESETS: &[(&str, Color32)] = &[
+    ("Cyan", Color32::from_rgb(0x2f, 0xb8, 0xff)),
+    ("Amber", Color32::from_rgb(0xff, 0xb0, 0x20)),
+    ("Violet", Color32::from_rgb(0xc4, 0x84, 0xfc)),
+    ("Red", Color32::from_rgb(0xff, 0x4d, 0x4d)),
+    ("Orange", Color32::from_rgb(0xff, 0x7a, 0x1a)),
+    ("Green", Color32::from_rgb(0x3d, 0xd6, 0x8c)),
+    ("Pink", Color32::from_rgb(0xff, 0x5c, 0xa8)),
+    ("White", Color32::from_rgb(0xe8, 0xe8, 0xe8)),
+];
+
 pub fn by_name(name: &str) -> Theme {
     match name {
+        "amoled_amber" => AMOLED_AMBER,
+        "amoled_violet" => AMOLED_VIOLET,
         "dark" => DARK,
+        "light" => LIGHT,
+        "light_warm" => LIGHT_WARM,
         _ => AMOLED,
     }
 }
@@ -126,17 +242,100 @@ pub fn hex_of(c: Color32) -> String {
     format!("{:02x}{:02x}{:02x}", c.r(), c.g(), c.b())
 }
 
+fn scale_rgb(c: Color32, factor: f32) -> Color32 {
+    Color32::from_rgb(
+        ((c.r() as f32) * factor).round().clamp(0.0, 255.0) as u8,
+        ((c.g() as f32) * factor).round().clamp(0.0, 255.0) as u8,
+        ((c.b() as f32) * factor).round().clamp(0.0, 255.0) as u8,
+    )
+}
+
+fn mix_rgb(a: Color32, b: Color32, t: f32) -> Color32 {
+    let t = t.clamp(0.0, 1.0);
+    Color32::from_rgb(
+        (a.r() as f32 + (b.r() as f32 - a.r() as f32) * t).round() as u8,
+        (a.g() as f32 + (b.g() as f32 - a.g() as f32) * t).round() as u8,
+        (a.b() as f32 + (b.b() as f32 - a.b() as f32) * t).round() as u8,
+    )
+}
+
 /// Override accent / selection colors from a user hex string. Empty = no-op.
+/// On AMOLED this retints hover, selection, and separators so the whole
+/// chrome follows the chosen color (cyan → red, etc.).
 pub fn apply_accent_override(t: &mut Theme, hex: &str) {
     let Some(c) = parse_hex(hex) else { return };
     t.accent = c;
-    t.accent_dim = Color32::from_rgb(c.r() / 3, c.g() / 3, c.b() / 3);
-    t.selection_bg = Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), 48);
+    if t.dark {
+        t.accent_dim = scale_rgb(c, 0.38);
+        t.selection_bg = scale_rgb(c, 0.20);
+        if t.bg == Color32::BLACK {
+            t.hover_bg = scale_rgb(c, 0.07);
+            t.stripe = scale_rgb(c, 0.04);
+            t.separator = mix_rgb(Color32::from_rgb(0x1a, 0x1a, 0x1a), c, 0.22);
+        } else {
+            t.hover_bg = mix_rgb(t.hover_bg, c, 0.14);
+        }
+    } else {
+        t.accent_dim = mix_rgb(c, Color32::WHITE, 0.55);
+        t.selection_bg = mix_rgb(c, Color32::WHITE, 0.80);
+    }
+}
+
+/// Preset chips plus a custom color picker. Writes an RGB hex string
+/// (no `#`) into `accent_hex`. Returns true if the value changed.
+pub fn accent_editor(ui: &mut egui::Ui, accent_hex: &mut String, current: Color32) -> bool {
+    let mut changed = false;
+    ui.horizontal_wrapped(|ui| {
+        for (name, color) in ACCENT_PRESETS {
+            let selected = current == *color;
+            if color_swatch(ui, *color, selected, name).clicked() {
+                *accent_hex = hex_of(*color);
+                changed = true;
+            }
+        }
+        let mut rgb = [current.r(), current.g(), current.b()];
+        if ui
+            .color_edit_button_srgb(&mut rgb)
+            .on_hover_text("Custom color")
+            .changed()
+        {
+            *accent_hex = hex_of(Color32::from_rgb(rgb[0], rgb[1], rgb[2]));
+            changed = true;
+        }
+        ui.weak(format!("#{}", hex_of(current)));
+        if !accent_hex.is_empty() && ui.small_button("Reset").clicked() {
+            accent_hex.clear();
+            changed = true;
+        }
+    });
+    changed
+}
+
+fn color_swatch(ui: &mut egui::Ui, color: Color32, selected: bool, tip: &str) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::click());
+    let stroke = if selected {
+        Stroke::new(2.0, Color32::WHITE)
+    } else {
+        Stroke::new(1.0, Color32::from_gray(70))
+    };
+    ui.painter().rect(
+        rect.shrink(1.0),
+        3.0,
+        color,
+        stroke,
+        egui::StrokeKind::Inside,
+    );
+    resp.on_hover_text(tip)
 }
 
 /// Apply the theme to the egui context.
 pub fn apply(ctx: &egui::Context, t: &Theme) {
-    let mut v = Visuals::dark();
+    let mut v = if t.dark {
+        Visuals::dark()
+    } else {
+        Visuals::light()
+    };
+    v.dark_mode = t.dark;
     v.override_text_color = Some(t.text);
     v.panel_fill = t.panel;
     v.window_fill = t.bg;
@@ -168,9 +367,11 @@ pub fn apply(ctx: &egui::Context, t: &Theme) {
     v.widgets.active.fg_stroke = Stroke::new(1.0, t.text_strong);
     v.widgets.open.fg_stroke = Stroke::new(1.0, t.text_strong);
 
-    // Force dark mode and apply to all styles. No animations that would
-    // force continuous repaints.
-    ctx.set_theme(egui::Theme::Dark);
+    ctx.set_theme(if t.dark {
+        egui::Theme::Dark
+    } else {
+        egui::Theme::Light
+    });
     ctx.all_styles_mut(|style| {
         style.visuals = v.clone();
         style.animation_time = 0.0;

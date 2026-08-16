@@ -8,12 +8,33 @@ use sc_core::FsEntry;
 use std::path::Path;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::ERROR_NO_MORE_FILES;
+use windows::Win32::Foundation::FILETIME;
 use windows::Win32::Storage::FileSystem::{
-    FindClose, FindExInfoBasic, FindExSearchNameMatch, FindFirstFileExW, FindNextFileW,
-    FIND_FIRST_EX_LARGE_FETCH, WIN32_FIND_DATAW,
+    FileTimeToLocalFileTime, FindClose, FindExInfoBasic, FindExSearchNameMatch, FindFirstFileExW,
+    FindNextFileW, FIND_FIRST_EX_LARGE_FETCH, WIN32_FIND_DATAW,
 };
 
 pub const BATCH_SIZE: usize = 4096;
+
+/// Convert a UTC FILETIME tick count to the equivalent local FILETIME.
+/// Display code can then format those ticks as civil wall-clock time.
+pub fn filetime_utc_to_local(ft: u64) -> u64 {
+    if ft == 0 {
+        return 0;
+    }
+    let utc = FILETIME {
+        dwLowDateTime: ft as u32,
+        dwHighDateTime: (ft >> 32) as u32,
+    };
+    let mut local = FILETIME::default();
+    unsafe {
+        if FileTimeToLocalFileTime(&utc, &mut local).is_ok() {
+            ((local.dwHighDateTime as u64) << 32) | local.dwLowDateTime as u64
+        } else {
+            ft
+        }
+    }
+}
 
 /// Convert a path to an extended-length wide string with a trailing pattern.
 fn wide_search_pattern(path: &Path) -> Vec<u16> {

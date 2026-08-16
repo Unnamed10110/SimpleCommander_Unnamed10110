@@ -1,16 +1,17 @@
 //! Main window layout: toolbar, dual panes (tabs + virtualized file table),
 //! status bar, keyboard handling, drag & drop.
 
-use crate::app::{AddressEdit, ScApp, SearchMode, TabRename};
+use crate::app::{AddressEdit, Marquee, ScApp, SearchMode, TabRename};
 use crate::jobs::Job;
 use crate::theme::LABEL_COLORS;
 use egui::text::CCursorRange;
-use egui::{Align2, Color32, CursorIcon, Key, Modifiers, RichText, Sense, TextEdit, Ui};
+use egui::{Align2, Color32, CursorIcon, Key, Modifiers, Rect, RichText, Sense, TextEdit, Ui};
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use egui_extras::{Column, TableBuilder};
 use sc_core::entry::format_size;
 use sc_core::sort::SortKey;
-use sc_core::state::{PaneLayout, SplitDirection};
+use sc_core::state::{PaneLayout, SplitDirection, TabState};
 use std::path::PathBuf;
 
 pub fn draw(app: &mut ScApp, ui: &mut Ui) {
@@ -1572,6 +1573,71 @@ struct RowAction {
     windows_menu: bool,
     row_menu_pos: Option<egui::Pos2>,
     drop_into: Option<(Vec<PathBuf>, PathBuf, bool)>,
+    start_marquee: bool,
+}
+
+fn view_index_at_y(row_rects: &[(usize, Rect)], y: f32, n: usize) -> usize {
+    if n == 0 {
+        return 0;
+    }
+    for &(v, r) in row_rects {
+        if y >= r.min.y && y < r.max.y {
+            return v;
+        }
+    }
+    if let Some(&(first, r0)) = row_rects.first() {
+        if y < r0.min.y {
+            let h = r0.height().max(1.0);
+            let back = ((r0.min.y - y) / h).ceil() as usize;
+            return first.saturating_sub(back);
+        }
+    }
+    if let Some(&(last, r1)) = row_rects.last() {
+        let h = r1.height().max(1.0);
+        if y >= r1.max.y {
+            let fwd = ((y - r1.max.y) / h).floor() as usize;
+            return (last + 1 + fwd).min(n - 1);
+        }
+        return last;
+    }
+    n - 1
+}
+
+fn apply_marquee_range(
+    tab: &mut TabState,
+    from: usize,
+    to: usize,
+    additive: bool,
+    keep: &HashSet<u32>,
+) {
+    let n = tab.view.len();
+    if n == 0 {
+        return;
+    }
+    let a = from.min(to).min(n - 1);
+    let b = from.max(to).min(n - 1);
+    if additive {
+        tab.selection = keep.clone();
+    } else {
+        tab.selection.clear();
+    }
+    if let Some(slice) = tab.view.get(a..=b) {
+        for &e in slice {
+            tab.selection.insert(e);
+        }
+    }
+    tab.cursor = Some(to.min(n - 1));
+}
+
+fn paint_marquee(ui: &Ui, rect: Rect, accent: Color32) {
+    let fill = Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 40);
+    ui.painter().rect(
+        rect,
+        0.0,
+        fill,
+        egui::Stroke::new(1.0, accent),
+        egui::StrokeKind::Inside,
+    );
 }
 
 fn file_table(app: &mut ScApp, ui: &mut Ui, pane: usize) {
@@ -1622,6 +1688,7 @@ fn file_table(app: &mut ScApp, ui: &mut Ui, pane: usize) {
         windows_menu: false,
         row_menu_pos: None,
         drop_into: None,
+        start_marquee: false,
     };
     let mut sort_click: Option<SortKey> = None;
     let mut rename_commit = false;
@@ -1657,6 +1724,8 @@ fn file_table(app: &mut ScApp, ui: &mut Ui, pane: usize) {
     let mut row_got_secondary = false;
     let mut dropped_on_dir = false;
     let mut dir_drop_hover = false;
+    let mut pointer_on_row = false;
+    let mut row_rects: Vec<(usize, Rect)> = Vec::new();
     {
         let n = view.len();
         let avail_height = ui.available_height();
@@ -1950,6 +2019,10 @@ fn file_table(app: &mut ScApp, ui: &mut Ui, pane: usize) {
 
                     // Row interactions.
                     let resp = row.response();
+                    row_rects.push((vpos, resp.rect));
+                    if resp.contains_pointer() {
+                        pointer_on_row = true;
+                    }
                     if entry.is_dir() {
                         if let Some(drag) = resp.dnd_hover_payload::<FileDrag>() {
                             let dest = dir_path.join(&entry.name);
@@ -1987,20 +2060,17 @@ fn file_table(app: &mut ScApp, ui: &mut Ui, pane: usize) {
                             dropped_on_dir = true;
                         }
                     }
-                    if resp.drag_started() {
-                        let paths = if selected {
-                            selection
+                    if resp.drag_started() && app.marquee.is_none() {
+                        if selected {
+                            let paths: Vec<PathBuf> = selection
                                 .iter()
                                 .filter_map(|&idx| {
                                     entries.get(idx as usize).map(|e| dir_path.join(&e.name))
                                 })
-                                .collect()
-                        } else {
-                            vec![dir_path.join(&entry.name)]
-                        };
-                        resp.dnd_set_drag_payload(FileDrag { paths });
-                        if !selected {
-                            action.select_single = Some((ei, vpos));
+                                .collect();
+                            resp.dnd_set_drag_payload(FileDrag { paths });
+                        } else if app.rename.is_none() {
+                            action.start_marquee = true;
                         }
                     } else if resp.double_clicked() {
                         action.open = Some(ei);
@@ -2078,6 +2148,102 @@ fn file_table(app: &mut ScApp, ui: &mut Ui, pane: usize) {
         }
     }
 
+    let scroll_gutter = 16.0;
+    let in_scroll_gutter = ui.input(|i| {
+        i.pointer.latest_pos().is_some_and(|p| p.x >= body_rect.max.x - scroll_gutter)
+    });
+    let dragging_files = egui::DragAndDrop::has_payload_of_type::<FileDrag>(ui.ctx());
+    let drag_started = ui.input(|i| i.pointer.is_decidedly_dragging() && i.pointer.primary_down());
+    let empty_marquee = drag_started
+        && !pointer_on_row
+        && !in_scroll_gutter
+        && !dragging_files
+        && app.rename.is_none()
+        && ui.rect_contains_pointer(body_rect);
+    if (action.start_marquee || empty_marquee) && app.marquee.is_none() && !dragging_files {
+        if let Some(origin) = ui.input(|i| i.pointer.press_origin()) {
+            let additive = ui.input(|i| i.modifiers.ctrl || i.modifiers.command);
+            let keep = if additive {
+                app.panes[pane].tab().selection.clone()
+            } else {
+                HashSet::new()
+            };
+            app.marquee = Some(Marquee {
+                pane,
+                tab_uid,
+                origin,
+                additive,
+                keep,
+            });
+        }
+    }
+
+    let mut marquee_ended = false;
+    let mut marquee_scroll = false;
+    let marquee_now = app.marquee.clone().filter(|m| m.pane == pane && m.tab_uid == tab_uid);
+    if dragging_files && marquee_now.is_some() {
+        marquee_ended = true;
+    } else if let Some(m) = marquee_now {
+        let pos = ui
+            .input(|i| i.pointer.interact_pos().or(i.pointer.hover_pos()))
+            .unwrap_or(m.origin);
+        let n = view.len();
+        if n > 0 {
+            let from = view_index_at_y(&row_rects, m.origin.y, n);
+            let to = view_index_at_y(&row_rects, pos.y, n);
+            apply_marquee_range(app.panes[pane].tab_mut(), from, to, m.additive, &m.keep);
+        }
+        let band = Rect::from_two_pos(m.origin, pos).intersect(body_rect);
+        if band.width() > 1.0 && band.height() > 1.0 {
+            paint_marquee(ui, band, theme.accent);
+        }
+        let primary_down = ui.input(|i| i.pointer.primary_down());
+        if primary_down {
+            ui.ctx().request_repaint();
+            const EDGE: f32 = 20.0;
+            if pos.y < body_rect.min.y + EDGE {
+                if let Some(c) = app.panes[pane].tab().cursor {
+                    if c > 0 {
+                        app.panes[pane].tab_mut().cursor = Some(c - 1);
+                        app.force_scroll_tab = Some(tab_uid);
+                        marquee_scroll = true;
+                    }
+                }
+            } else if pos.y > body_rect.max.y - EDGE {
+                let last = n.saturating_sub(1);
+                if let Some(c) = app.panes[pane].tab().cursor {
+                    if c < last {
+                        app.panes[pane].tab_mut().cursor = Some(c + 1);
+                        app.force_scroll_tab = Some(tab_uid);
+                        marquee_scroll = true;
+                    }
+                }
+            }
+        } else {
+            marquee_ended = true;
+        }
+    }
+    if marquee_ended {
+        app.marquee = None;
+        update_preview_from_selection(app, pane);
+    }
+
+    let empty_click = ui.input(|i| i.pointer.primary_clicked())
+        && ui.rect_contains_pointer(body_rect)
+        && !pointer_on_row
+        && !in_scroll_gutter
+        && app.marquee.is_none()
+        && !marquee_ended
+        && !ui.input(|i| i.modifiers.ctrl || i.modifiers.shift || i.modifiers.command);
+    if empty_click {
+        let tab = app.panes[pane].tab_mut();
+        if !tab.selection.is_empty() {
+            tab.selection.clear();
+            tab.cursor = None;
+            update_preview_from_selection(app, pane);
+        }
+    }
+
     // ---- apply deferred actions (after the immutable borrow ends) ----
     if let Some((sources, dest, is_move)) = action.drop_into {
         app.drop_files_into(sources, dest, is_move);
@@ -2106,11 +2272,13 @@ fn file_table(app: &mut ScApp, ui: &mut Ui, pane: usize) {
         app.rename = None;
     }
     if let Some((ei, vpos)) = action.select_single {
-        let tab = app.panes[pane].tab_mut();
-        tab.selection.clear();
-        tab.selection.insert(ei);
-        tab.cursor = Some(vpos);
-        update_preview_from_selection(app, pane);
+        if app.marquee.is_none() && !action.start_marquee && !marquee_ended {
+            let tab = app.panes[pane].tab_mut();
+            tab.selection.clear();
+            tab.selection.insert(ei);
+            tab.cursor = Some(vpos);
+            update_preview_from_selection(app, pane);
+        }
     }
     if let Some((ei, vpos)) = action.toggle {
         let tab = app.panes[pane].tab_mut();
@@ -2153,7 +2321,7 @@ fn file_table(app: &mut ScApp, ui: &mut Ui, pane: usize) {
         app.pane_bg_menu = None;
         app.row_ctx_menu = Some((pane, ei, pos));
     }
-    if force_scroll {
+    if force_scroll && !marquee_scroll {
         app.force_scroll_tab = None;
     }
 }

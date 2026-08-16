@@ -256,8 +256,21 @@ pub struct ScApp {
     pub pending_select: Option<(u64, Vec<String>)>,
     /// Scroll the file table to the cursor for this tab once.
     pub force_scroll_tab: Option<u64>,
+    /// Rubber-band selection in a file list (drag on empty space or unselected rows).
+    pub marquee: Option<Marquee>,
     /// Name prompt for New file / New folder.
     pub new_item: Option<NewItemPrompt>,
+}
+
+/// In-progress mouse region selection.
+#[derive(Clone)]
+pub struct Marquee {
+    pub pane: usize,
+    pub tab_uid: u64,
+    pub origin: egui::Pos2,
+    /// Ctrl/Cmd held at drag start → union with the previous selection.
+    pub additive: bool,
+    pub keep: HashSet<u32>,
 }
 
 impl ScApp {
@@ -439,6 +452,7 @@ impl ScApp {
             capture_shortcut: None,
             pending_select: None,
             force_scroll_tab: None,
+            marquee: None,
             new_item: None,
         };
         app.tree_open = session.tree_expanded.iter().cloned().collect();

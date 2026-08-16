@@ -4,6 +4,14 @@ A fast, XYplorer-class dual-pane file explorer for Windows, written in Rust.
 
 ![status](https://img.shields.io/badge/status-alpha-orange)
 
+<img width="1920" height="1040" alt="simplecommander_16_08_2026_02_10_04" src="https://github.com/user-attachments/assets/c9f2a016-219d-4e00-87dd-1052a44e96bf" />
+
+<img width="1288" height="838" alt="tacky-borders_16_08_2026_02_17_32" src="https://github.com/user-attachments/assets/b3f264ee-da68-44ed-a135-d2d8d8c63dd8" />
+
+<img width="1920" height="1040" alt="simplecommander_16_08_2026_02_11_40" src="https://github.com/user-attachments/assets/24a4fe65-3a40-4dc0-a982-044922a606cb" />
+
+
+
 ## Highlights
 
 - **Dual pane** (vertical or horizontal split) with tabs per pane, locked tabs,

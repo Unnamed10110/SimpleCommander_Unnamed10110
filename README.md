@@ -119,3 +119,7 @@ directory < 500 ms, idle RAM < 80 MB, search results < 50 ms via MFT index.
   fallback indexer covers your user profile.
 - Settings are portable (`settings.toml` next to the exe when writable,
   `%APPDATA%\SimpleCommander` otherwise).
+  
+## Contect/Developer
+
+- Unnamed10110 / trojan.v6@gmail.com / sergiobritos10110@gmail.com

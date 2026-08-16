@@ -340,14 +340,19 @@ pub fn draw(app: &mut ScApp, ctx: &egui::Context) {
         return;
     }
     let mut open = true;
+    let screen = ctx.content_rect();
+    let max_size = (screen.size() - egui::vec2(32.0, 32.0)).max(egui::vec2(320.0, 240.0));
     egui::Window::new("Preview")
         .open(&mut open)
         .pivot(Align2::CENTER_CENTER)
-        .default_pos(ctx.content_rect().center())
+        .default_pos(screen.center())
+        .constrain_to(screen)
         .resizable(true)
         .collapsible(false)
+        .scroll(false)
         .default_size([640.0, 480.0])
         .min_size([320.0, 240.0])
+        .max_size(max_size)
         .show(ctx, |ui| {
             preview_pane(app, ui);
         });
@@ -424,10 +429,7 @@ fn preview_pane(app: &mut ScApp, ui: &mut Ui) {
         return;
     }
     if let Some(tex) = &app.preview.texture {
-        let avail = ui.available_size();
-        let size = tex.size_vec2();
-        let scale = (avail.x / size.x).min(avail.y.max(1.0) / size.y).min(1.0);
-        ui.add(egui::Image::new(egui::load::SizedTexture::new(tex.id(), size * scale)));
+        draw_fitted_image(ui, tex);
         return;
     }
     if let Some(text) = app.preview.text.clone() {
@@ -441,6 +443,32 @@ fn preview_pane(app: &mut ScApp, ui: &mut Ui) {
     if let Some(info) = &app.preview.info {
         ui.weak(info);
     }
+}
+
+fn draw_fitted_image(ui: &mut Ui, tex: &egui::TextureHandle) {
+    let avail = ui.available_size();
+    if avail.x < 1.0 || avail.y < 1.0 || !avail.x.is_finite() || !avail.y.is_finite() {
+        return;
+    }
+    let (rect, _) = ui.allocate_exact_size(avail, Sense::hover());
+    let tex_size = tex.size_vec2();
+    if tex_size.x <= 0.0 || tex_size.y <= 0.0 {
+        return;
+    }
+    let scale = (rect.width() / tex_size.x).min(rect.height() / tex_size.y);
+    let fitted = tex_size * scale.max(0.0);
+    if fitted.x < 1.0 || fitted.y < 1.0 {
+        return;
+    }
+    let image_rect = Align2::CENTER_CENTER
+        .align_size_within_rect(fitted, rect)
+        .intersect(rect);
+    ui.painter().with_clip_rect(rect).image(
+        tex.id(),
+        image_rect,
+        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+        egui::Color32::WHITE,
+    );
 }
 
 fn draw_text(ui: &mut Ui, text: &str) {

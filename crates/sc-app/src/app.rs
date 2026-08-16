@@ -243,7 +243,8 @@ pub struct ScApp {
     /// Settings row currently waiting for a key press.
     pub capture_shortcut: Option<ShortcutId>,
     /// After New file/folder completes, select this name in the list.
-    pub pending_select: Option<(u64, String)>,
+    /// After New file/folder or a copy/move into a tab, select these names.
+    pub pending_select: Option<(u64, Vec<String>)>,
     /// Scroll the file table to the cursor for this tab once.
     pub force_scroll_tab: Option<u64>,
     /// Name prompt for New file / New folder.
@@ -580,7 +581,7 @@ impl ScApp {
             return;
         }
         let uid = tab.uid;
-        self.pending_select = Some((uid, name));
+        self.pending_select = Some((uid, vec![name]));
         self.force_scroll_tab = Some(uid);
         self.new_item = None;
         if is_folder {
@@ -692,24 +693,87 @@ impl ScApp {
     }
 
     fn try_select_pending(&mut self, pane: usize, tab_index: usize) {
-        let Some((uid, name)) = self.pending_select.clone() else {
+        let Some((uid, names)) = self.pending_select.clone() else {
             return;
         };
         let tab = &self.panes[pane].tabs[tab_index];
         if tab.uid != uid {
             return;
         }
-        let Some(ei) = tab.snapshot.entries.iter().position(|e| e.name == name) else {
+        let mut selected = HashSet::new();
+        for (i, e) in tab.snapshot.entries.iter().enumerate() {
+            if names.iter().any(|n| n == &e.name) {
+                selected.insert(i as u32);
+            }
+        }
+        if selected.is_empty() {
+            if !tab.loading {
+                self.pending_select = None;
+            }
             return;
-        };
-        let view_pos = tab.view.iter().position(|&x| x == ei as u32);
+        }
+        let cursor = tab.view.iter().position(|&x| selected.contains(&x));
         let tab = &mut self.panes[pane].tabs[tab_index];
-        tab.selection.clear();
-        tab.selection.insert(ei as u32);
-        tab.cursor = view_pos;
+        tab.selection = selected;
+        tab.cursor = cursor;
         self.pending_select = None;
         self.force_scroll_tab = Some(uid);
         self.active_pane = pane;
+        self.panes[pane].active_tab = tab_index;
+    }
+
+    fn best_tab_uid_for_path(&self, dest: &Path) -> Option<u64> {
+        let pane = self.active_pane.min(self.panes.len().saturating_sub(1));
+        if let Some(p) = self.panes.get(pane) {
+            if p.tab().path == dest {
+                return Some(p.tab().uid);
+            }
+            if let Some(t) = p.tabs.iter().find(|t| t.path == dest) {
+                return Some(t.uid);
+            }
+        }
+        for (i, p) in self.panes.iter().enumerate() {
+            if i == pane {
+                continue;
+            }
+            if p.tab().path == dest {
+                return Some(p.tab().uid);
+            }
+            if let Some(t) = p.tabs.iter().find(|t| t.path == dest) {
+                return Some(t.uid);
+            }
+        }
+        None
+    }
+
+    fn focus_tab_uid(&mut self, uid: u64) {
+        if let Some((pane, ti)) = self.find_tab_by_uid(uid) {
+            self.active_pane = pane;
+            self.panes[pane].active_tab = ti;
+            self.force_scroll_tab = Some(uid);
+        }
+    }
+
+    /// After a copy/move/create, select the new items in the destination tab.
+    fn select_created_items(&mut self, created: Vec<PathBuf>) {
+        if created.is_empty() {
+            return;
+        }
+        let Some(dest) = created[0].parent().map(Path::to_path_buf) else {
+            return;
+        };
+        let names: Vec<String> = created
+            .iter()
+            .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .collect();
+        if names.is_empty() {
+            return;
+        }
+        let Some(uid) = self.best_tab_uid_for_path(&dest) else {
+            return;
+        };
+        self.pending_select = Some((uid, names));
+        self.focus_tab_uid(uid);
     }
 
     fn handle_msg(&mut self, ctx: &egui::Context, msg: UiMsg) {
@@ -913,13 +977,14 @@ impl ScApp {
                     }
                 }
             }
-            OpEvent::Done { op_id, undo, refresh } => {
+            OpEvent::Done { op_id, undo, refresh, created } => {
                 if let Some(v) = self.ops_view.iter_mut().find(|o| o.op_id == op_id) {
                     v.finished = true;
                 }
                 if let Some(u) = undo {
                     self.undo.record(u);
                 }
+                self.select_created_items(created);
                 self.refresh_all_matching(&refresh);
             }
             OpEvent::Failed { op_id, error } => {
@@ -1076,6 +1141,7 @@ impl ScApp {
                 .filter_map(|&i| tab.snapshot.entries.get(i as usize))
                 .map(|e| (e.name.clone(), e.is_dir()))
                 .collect();
+            let names: Vec<String> = selected.iter().map(|(n, _)| n.clone()).collect();
             let mut err = None;
             for (name, is_dir) in selected {
                 let inner = if inner_dir.is_empty() {
@@ -1091,6 +1157,9 @@ impl ScApp {
                 Some(e) => self.toast(e, true),
                 None => self.toast("Extracted to other pane".into(), false),
             }
+            let uid = self.panes[other].tab().uid;
+            self.pending_select = Some((uid, names));
+            self.focus_tab_uid(uid);
             self.refresh_all_matching(&[dest]);
             return;
         }

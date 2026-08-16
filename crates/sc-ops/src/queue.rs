@@ -72,7 +72,7 @@ pub enum OpEvent {
         current: String,
     },
     Conflict { op_id: u64, source: PathBuf, dest: PathBuf },
-    Done { op_id: u64, undo: Option<UndoAction>, refresh: Vec<PathBuf> },
+    Done { op_id: u64, undo: Option<UndoAction>, refresh: Vec<PathBuf>, created: Vec<PathBuf> },
     Failed { op_id: u64, error: String },
     Cancelled { op_id: u64 },
 }
@@ -245,7 +245,10 @@ impl Worker {
             }
         };
         match result {
-            Ok(undo) => self.send(OpEvent::Done { op_id, undo, refresh }),
+            Ok(undo) => {
+                let created = created_dests(&undo);
+                self.send(OpEvent::Done { op_id, undo, refresh, created });
+            }
             Err(e) if e == "__cancelled__" => self.send(OpEvent::Cancelled { op_id }),
             Err(e) => self.send(OpEvent::Failed { op_id, error: e }),
         }
@@ -546,6 +549,15 @@ fn scan_one(p: &Path, t: &mut Totals) {
             t.bytes += meta.len();
             t.files += 1;
         }
+    }
+}
+
+fn created_dests(undo: &Option<UndoAction>) -> Vec<PathBuf> {
+    match undo {
+        Some(UndoAction::DeletePaths(paths)) => paths.clone(),
+        Some(UndoAction::MoveBack { pairs }) => pairs.iter().map(|(_, to)| to.clone()).collect(),
+        Some(UndoAction::RenameBack { from, .. }) => vec![from.clone()],
+        None => Vec::new(),
     }
 }
 

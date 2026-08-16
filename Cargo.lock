@@ -5446,7 +5446,7 @@ dependencies = [
 
 [[package]]
 name = "sc-app"
-version = "1.0.0"
+version = "0.1.0"
 dependencies = [
  "crossbeam-channel",
  "dpi",
@@ -5478,7 +5478,7 @@ dependencies = [
 
 [[package]]
 name = "sc-bench"
-version = "1.0.0"
+version = "0.1.0"
 dependencies = [
  "criterion",
  "fastrand",
@@ -5489,14 +5489,14 @@ dependencies = [
 
 [[package]]
 name = "sc-core"
-version = "1.0.0"
+version = "0.1.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "sc-index"
-version = "1.0.0"
+version = "0.1.0"
 dependencies = [
  "crossbeam-channel",
  "parking_lot",
@@ -5507,7 +5507,7 @@ dependencies = [
 
 [[package]]
 name = "sc-ops"
-version = "1.0.0"
+version = "0.1.0"
 dependencies = [
  "crossbeam-channel",
  "parking_lot",
@@ -5518,7 +5518,7 @@ dependencies = [
 
 [[package]]
 name = "sc-plugins"
-version = "1.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "sc-core",
@@ -5530,7 +5530,7 @@ dependencies = [
 
 [[package]]
 name = "sc-shell"
-version = "1.0.0"
+version = "0.1.0"
 dependencies = [
  "crossbeam-channel",
  "parking_lot",

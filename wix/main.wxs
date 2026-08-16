@@ -87,7 +87,7 @@
       <ComponentRef Id="ShellVerb" />
     </Feature>
 
-    <Icon Id="AppIcon" SourceFile="..\crates\sc-app\assets\icon.ico" />
+    <Icon Id="AppIcon" SourceFile="$(sys.SOURCEFILEDIR)..\crates\sc-app\assets\icon.ico" />
     <Property Id="ARPPRODUCTICON" Value="AppIcon" />
     <Property Id="ARPHELPLINK" Value="https://github.com/simplecommander/simplecommander" />
     <UI>

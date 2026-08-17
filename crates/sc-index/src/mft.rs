@@ -205,12 +205,15 @@ impl MftIndex {
     }
 
     /// Case-insensitive Everything-style search; `pred` sees a full path.
-    pub fn search(&self, pred: &dyn Fn(&str) -> bool, name_suffix: Option<&str>, max: usize, out: &mut Vec<(PathBuf, bool)>) {
+    pub fn search(&self, pred: &dyn Fn(&str) -> bool, name_suffix: Option<&str>, max: usize, dirs_only: bool, out: &mut Vec<(PathBuf, bool)>) {
         let inner = self.inner.read();
         let mut path_cache: HashMap<u64, Option<String>> = HashMap::new();
         for (_frn, e) in inner.entries.iter() {
             if out.len() >= max {
                 return;
+            }
+            if dirs_only && !e.is_dir {
+                continue;
             }
             if let Some(suf) = name_suffix {
                 if !e.name_lower.ends_with(suf) {

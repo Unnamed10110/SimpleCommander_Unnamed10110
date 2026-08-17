@@ -194,6 +194,14 @@ impl PaneState {
         self.active_tab = self.tabs.len() - 1;
     }
 
+    /// Insert a tab immediately after the active one without switching to it.
+    /// Returns the new tab's index.
+    pub fn insert_tab_beside(&mut self, path: PathBuf) -> usize {
+        let index = (self.active_tab + 1).min(self.tabs.len());
+        self.tabs.insert(index, TabState::new(path));
+        index
+    }
+
     /// Close a tab; keeps at least one tab alive. Returns false if refused.
     pub fn close_tab(&mut self, index: usize) -> bool {
         if self.tabs.len() <= 1 || index >= self.tabs.len() || self.tabs[index].locked {
@@ -263,6 +271,23 @@ mod tests {
         assert_eq!(t.title(), "Work");
         t.locked = true;
         assert!(t.title().contains("Work"));
+    }
+
+    #[test]
+    fn insert_tab_beside_keeps_focus() {
+        let mut p = pane_with(3);
+        p.active_tab = 0;
+        let idx = p.insert_tab_beside(PathBuf::from("C:\\new"));
+        assert_eq!(idx, 1);
+        assert_eq!(p.active_tab, 0);
+        assert_eq!(p.tabs[1].path, PathBuf::from("C:\\new"));
+        assert_eq!(p.tabs.len(), 4);
+
+        p.active_tab = 3;
+        let idx = p.insert_tab_beside(PathBuf::from("C:\\end"));
+        assert_eq!(idx, 4);
+        assert_eq!(p.active_tab, 3);
+        assert_eq!(p.tabs[4].path, PathBuf::from("C:\\end"));
     }
 
     #[test]

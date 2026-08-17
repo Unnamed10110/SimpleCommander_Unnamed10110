@@ -78,8 +78,9 @@ Install via **Tools → Plugin manager → Install plugin**, then grant the
 | F6 | Switch pane |
 | Ctrl+T / Ctrl+W | New / close tab |
 | Ctrl+L | Focus address bar |
-| Ctrl+F | Search (everywhere / this folder / content) |
-| Ctrl+P | Quick-jump palette |
+| Ctrl+F | Focus the pane filter box |
+| Ctrl+Shift+F | Search (everywhere / this folder / content) |
+| Ctrl+P | Quick-jump to a folder |
 | Ctrl+C/X/V | Explorer-compatible clipboard |
 | Ctrl+Shift+C | Copy full path(s) of the selection |
 | Ctrl+Alt+C / Ctrl+Shift+M | Copy / move to other pane |
@@ -93,7 +94,7 @@ Install via **Tools → Plugin manager → Install plugin**, then grant the
 | Ctrl+H | Toggle hidden files |
 | Backspace / Alt+←/→ | Up / history back / forward |
 | ← / → | Parent folder / enter folder |
-| Middle-click folder | Open in a new tab |
+| Middle-click folder | Open in a new tab beside the current one (stay on this tab) |
 | Shift+right-click | Windows Explorer context menu |
 
 ## Architecture

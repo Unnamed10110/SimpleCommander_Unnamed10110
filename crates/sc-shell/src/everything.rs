@@ -15,7 +15,7 @@ use windows::Win32::System::Registry::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, EnumWindows,
-    GetClassNameW, GetWindowLongPtrW, PeekMessageW, RegisterClassExW, SendMessageTimeoutW,
+    GetClassNameW, GetWindowLongPtrW, IsWindow, PeekMessageW, RegisterClassExW, SendMessageTimeoutW,
     SetWindowLongPtrW, TranslateMessage, CS_DBLCLKS, CW_USEDEFAULT, GWLP_USERDATA, PM_REMOVE,
     SMTO_ABORTIFHUNG, SMTO_BLOCK, WINDOW_EX_STYLE, WM_COPYDATA, WNDCLASSEXW,
     WS_POPUP, MSG,
@@ -65,6 +65,33 @@ struct Work {
 }
 
 static TX: OnceLock<Mutex<Sender<Work>>> = OnceLock::new();
+static PREFERRED_EXE: Mutex<Option<PathBuf>> = Mutex::new(None);
+static CACHED_HWND: Mutex<isize> = Mutex::new(0);
+
+/// Prefer this Everything.exe (empty / None restores auto-detect).
+pub fn set_preferred_exe(path: Option<PathBuf>) {
+    let path = path.and_then(|p| {
+        if p.as_os_str().is_empty() {
+            None
+        } else {
+            Some(p)
+        }
+    });
+    if let Ok(mut g) = PREFERRED_EXE.lock() {
+        *g = path;
+    }
+    invalidate_hwnd_cache();
+}
+
+/// User-configured path, if any (may not exist yet).
+pub fn preferred_exe() -> Option<PathBuf> {
+    PREFERRED_EXE.lock().ok().and_then(|g| g.clone())
+}
+
+/// Path that will actually be launched: configured file, else auto-detect.
+pub fn resolved_exe() -> Option<PathBuf> {
+    find_everything_exe()
+}
 
 /// Start Everything in the tray if it is installed but not running.
 pub fn warmup() {
@@ -73,7 +100,7 @@ pub fn warmup() {
 
 /// True when Everything's IPC window is present (it is running).
 pub fn is_running() -> bool {
-    ipc_hwnd().is_some()
+    everything_hwnd().is_some()
 }
 
 /// True when an Everything.exe install was found on disk.
@@ -108,7 +135,7 @@ pub fn search(query: &str, max: usize) -> Option<Vec<(PathBuf, bool)>> {
             reply: rtx,
         })
         .ok()?;
-    rrx.recv_timeout(Duration::from_secs(4)).ok().flatten()
+    rrx.recv_timeout(Duration::from_millis(1200)).ok().flatten()
 }
 
 /// Restrict an Everything query to a folder (recursive).
@@ -122,7 +149,31 @@ pub fn search_in(dir: &Path, query: &str, max: usize) -> Option<Vec<(PathBuf, bo
     search(&q, max)
 }
 
-fn ipc_hwnd() -> Option<HWND> {
+fn everything_hwnd() -> Option<HWND> {
+    if let Ok(g) = CACHED_HWND.lock() {
+        let h = HWND(*g as *mut std::ffi::c_void);
+        if hwnd_alive(h) {
+            return Some(h);
+        }
+    }
+    let found = enum_ipc_hwnd();
+    if let Ok(mut g) = CACHED_HWND.lock() {
+        *g = found.map(|h| h.0 as isize).unwrap_or(0);
+    }
+    found
+}
+
+fn invalidate_hwnd_cache() {
+    if let Ok(mut g) = CACHED_HWND.lock() {
+        *g = 0;
+    }
+}
+
+fn hwnd_alive(h: HWND) -> bool {
+    !h.is_invalid() && unsafe { IsWindow(Some(h)).as_bool() }
+}
+
+fn enum_ipc_hwnd() -> Option<HWND> {
     let mut found = HWND::default();
     unsafe {
         let _ = EnumWindows(Some(enum_ipc_windows), LPARAM(&mut found as *mut HWND as isize));
@@ -157,39 +208,87 @@ fn ipc_thread() -> &'static Mutex<Sender<Work>> {
         let (tx, rx) = mpsc::channel::<Work>();
         std::thread::Builder::new()
             .name("sc-everything-ipc".into())
-            .spawn(move || {
-                register_class();
-                while let Ok(work) = rx.recv() {
-                    let hits = perform_query(&work.query, work.max);
-                    let _ = work.reply.send(hits);
-                }
-            })
+            .spawn(move || ipc_worker(rx))
             .ok();
         Mutex::new(tx)
     })
+}
+
+fn ipc_worker(rx: mpsc::Receiver<Work>) {
+    register_class();
+    let hwnd = unsafe {
+        CreateWindowExW(
+            WINDOW_EX_STYLE(0),
+            OUR_CLASS,
+            w!("sc-ev"),
+            WS_POPUP,
+            CW_USEDEFAULT,
+            CW_USEDEFAULT,
+            0,
+            0,
+            None,
+            None,
+            None,
+            None,
+        )
+        .ok()
+    };
+    let Some(hwnd) = hwnd else {
+        while let Ok(work) = rx.recv() {
+            let _ = work.reply.send(None);
+        }
+        return;
+    };
+    let mut state = ReplyState {
+        items: Vec::new(),
+        got: false,
+    };
+    unsafe {
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, &mut state as *mut _ as isize);
+    }
+    while let Ok(work) = rx.recv() {
+        state.items.clear();
+        state.got = false;
+        let hits = perform_query_on(hwnd, &mut state, &work.query, work.max);
+        let _ = work.reply.send(hits);
+    }
+    unsafe {
+        let _ = DestroyWindow(hwnd);
+    }
 }
 
 fn ensure_running() {
     if is_running() {
         return;
     }
-    static START: OnceLock<()> = OnceLock::new();
-    START.get_or_init(|| {
-        let Some(exe) = find_everything_exe() else {
+    let Some(exe) = find_everything_exe() else {
+        return;
+    };
+    let _ = std::process::Command::new(exe).arg("-startup").spawn();
+    let deadline = Instant::now() + Duration::from_millis(800);
+    while Instant::now() < deadline {
+        invalidate_hwnd_cache();
+        if is_running() {
             return;
-        };
-        let _ = std::process::Command::new(exe).arg("-startup").spawn();
-        let deadline = Instant::now() + Duration::from_secs(3);
-        while Instant::now() < deadline {
-            if is_running() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(50));
         }
-    });
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 fn find_everything_exe() -> Option<PathBuf> {
+    if let Some(p) = preferred_exe() {
+        if p.is_file() {
+            return Some(p);
+        }
+        let as_dir = p.join("Everything.exe");
+        if as_dir.is_file() {
+            return Some(as_dir);
+        }
+        let as_dir64 = p.join("Everything64.exe");
+        if as_dir64.is_file() {
+            return Some(as_dir64);
+        }
+    }
     const PATHS: &[&str] = &[
         r"C:\Program Files\Everything\Everything.exe",
         r"C:\Program Files (x86)\Everything\Everything.exe",
@@ -281,32 +380,14 @@ fn register_class() {
     }
 }
 
-fn perform_query(query: &str, max: u32) -> Option<Vec<(PathBuf, bool)>> {
-    let ev = ipc_hwnd()?;
+fn perform_query_on(
+    hwnd: HWND,
+    state: &mut ReplyState,
+    query: &str,
+    max: u32,
+) -> Option<Vec<(PathBuf, bool)>> {
+    let ev = everything_hwnd()?;
     unsafe {
-        // A real top-level window: HWND_MESSAGE often never receives WM_COPYDATA
-        // from another process, which is how Everything delivers results.
-        let hwnd = CreateWindowExW(
-            WINDOW_EX_STYLE(0),
-            OUR_CLASS,
-            w!("sc-ev"),
-            WS_POPUP,
-            CW_USEDEFAULT,
-            CW_USEDEFAULT,
-            0,
-            0,
-            None,
-            None,
-            None,
-            None,
-        )
-        .ok()?;
-        let mut state = ReplyState {
-            items: Vec::new(),
-            got: false,
-        };
-        SetWindowLongPtrW(hwnd, GWLP_USERDATA, &mut state as *mut _ as isize);
-
         let wide: Vec<u16> = query.encode_utf16().chain(std::iter::once(0)).collect();
         let header = QueryHeader {
             reply_hwnd: hwnd.0 as usize as u32,
@@ -329,18 +410,21 @@ fn perform_query(query: &str, max: u32) -> Option<Vec<(PathBuf, bool)>> {
             lpData: buf.as_mut_ptr() as *mut _,
         };
         let mut result = 0usize;
-        let _ = SendMessageTimeoutW(
+        let sent = SendMessageTimeoutW(
             ev,
             WM_COPYDATA,
             WPARAM(hwnd.0 as usize),
             LPARAM(&cds as *const COPYDATASTRUCT as isize),
             SMTO_BLOCK | SMTO_ABORTIFHUNG,
-            3000,
+            800,
             Some(&mut result),
         );
+        if sent.0 == 0 {
+            invalidate_hwnd_cache();
+            return None;
+        }
 
-        // Everything often *posts* the result list after SendMessage returns.
-        let deadline = Instant::now() + Duration::from_millis(2000);
+        let deadline = Instant::now() + Duration::from_millis(600);
         while !state.got && Instant::now() < deadline {
             let mut msg = MSG::default();
             while PeekMessageW(&mut msg, Some(hwnd), 0, 0, PM_REMOVE).as_bool() {
@@ -348,17 +432,14 @@ fn perform_query(query: &str, max: u32) -> Option<Vec<(PathBuf, bool)>> {
                 DispatchMessageW(&msg);
             }
             if !state.got {
-                std::thread::sleep(Duration::from_millis(5));
+                std::thread::sleep(Duration::from_millis(1));
             }
         }
 
-        let got = state.got;
-        let items = std::mem::take(&mut state.items);
-        let _ = DestroyWindow(hwnd);
-        if !got {
+        if !state.got {
             return None;
         }
-        Some(items)
+        Some(std::mem::take(&mut state.items))
     }
 }
 

@@ -276,6 +276,10 @@ pub struct Marquee {
 impl ScApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let settings = config::load_settings();
+        sc_shell::everything::set_preferred_exe(
+            (!settings.everything_exe.trim().is_empty())
+                .then(|| PathBuf::from(settings.everything_exe.trim())),
+        );
         let session = if settings.restore_session {
             settings.session.clone()
         } else {
@@ -620,9 +624,7 @@ impl ScApp {
     }
 
     pub fn open_folder_in_new_tab(&mut self, pane: usize, path: PathBuf) {
-        self.panes[pane].add_tab(path);
-        let tab_index = self.panes[pane].active_tab;
-        self.active_pane = pane;
+        let tab_index = self.panes[pane].insert_tab_beside(path);
         self.request_listing_for(pane, tab_index, false);
     }
 
@@ -1506,6 +1508,8 @@ impl ScApp {
                     query,
                     max,
                     scope: None,
+                    dirs_only: false,
+                    near: Some(self.active_tab().path.clone()),
                 });
             }
             SearchMode::NameHere => {
@@ -1514,7 +1518,9 @@ impl ScApp {
                     query_id: id,
                     query,
                     max,
-                    scope: Some(scope),
+                    scope: Some(scope.clone()),
+                    dirs_only: false,
+                    near: Some(scope),
                 });
             }
             SearchMode::Content => {
@@ -1544,6 +1550,8 @@ impl ScApp {
             query,
             max,
             scope: None,
+            dirs_only: true,
+            near: Some(self.active_tab().path.clone()),
         });
     }
 
@@ -1650,6 +1658,10 @@ impl ScApp {
     }
 
     pub fn persist_settings(&mut self) {
+        sc_shell::everything::set_preferred_exe(
+            (!self.settings.everything_exe.trim().is_empty())
+                .then(|| PathBuf::from(self.settings.everything_exe.trim())),
+        );
         config::save_settings(&self.settings);
     }
 

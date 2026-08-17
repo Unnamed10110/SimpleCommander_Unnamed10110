@@ -108,11 +108,14 @@ impl FallbackIndex {
         self.inner.read().complete
     }
 
-    pub fn search(&self, pred: &dyn Fn(&str) -> bool, name_suffix: Option<&str>, max: usize, out: &mut Vec<(PathBuf, bool)>) {
+    pub fn search(&self, pred: &dyn Fn(&str) -> bool, name_suffix: Option<&str>, max: usize, dirs_only: bool, out: &mut Vec<(PathBuf, bool)>) {
         let inner = self.inner.read();
         for (i, (lower, dir_id, is_dir)) in inner.names.iter().enumerate() {
             if out.len() >= max {
                 return;
+            }
+            if dirs_only && !*is_dir {
+                continue;
             }
             if let Some(suf) = name_suffix {
                 if !lower.ends_with(suf) {

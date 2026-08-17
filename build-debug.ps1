@@ -7,6 +7,14 @@ param(
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
+$cargoBin = Join-Path $env:USERPROFILE ".cargo\bin"
+if (Test-Path -LiteralPath (Join-Path $cargoBin "cargo.exe")) {
+    $env:Path = "$cargoBin;$env:Path"
+}
+if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
+    throw "cargo not found. Install Rust with: winget install --id Rustlang.Rustup -e"
+}
+
 Write-Host "Building debug binary..." -ForegroundColor Cyan
 cargo build -p sc-app
 if ($LASTEXITCODE -ne 0) { throw "debug build failed" }

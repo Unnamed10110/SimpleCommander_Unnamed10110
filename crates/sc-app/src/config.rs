@@ -125,6 +125,9 @@ pub struct Settings {
     /// If true, do not offer to install Everything when it is missing.
     #[serde(default)]
     pub everything_prompt_dismissed: bool,
+    /// Optional path to Everything.exe. Empty = auto-detect.
+    #[serde(default)]
+    pub everything_exe: String,
 
     /// File-list columns (order + visibility). Name is always shown.
     #[serde(default = "default_columns")]
@@ -193,6 +196,7 @@ impl Default for Settings {
             search_max_results: 500,
             content_search_max_mb: 16,
             everything_prompt_dismissed: false,
+            everything_exe: String::new(),
             columns: default_columns(),
             terminal_command: default_terminal_command(),
             keymap: Keymap::default(),
@@ -264,6 +268,11 @@ pub fn load_settings() -> Settings {
             id: "sha256".into(),
             visible: false,
         });
+    }
+    let search_before = settings.keymap.search.clone();
+    settings.keymap.migrate_filter_shortcut();
+    if settings.keymap.search != search_before {
+        save_settings(&settings);
     }
     settings
 }

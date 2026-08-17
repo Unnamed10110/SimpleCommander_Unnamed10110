@@ -4,6 +4,7 @@
 use crate::fallback::FallbackIndex;
 use crate::mft::MftIndex;
 use parking_lot::RwLock;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -94,30 +95,53 @@ impl IndexService {
     }
 
     /// Instant name/path search. Uses Everything when it is installed/running.
+    /// When `dirs_only` is set, only folders are returned (and count toward `max`).
+    /// `near` ranks hits closest to that directory first (current folder).
     pub fn search_names(
         &self,
         query: &str,
         max: usize,
         scope: Option<&Path>,
+        dirs_only: bool,
+        near: Option<&Path>,
         should_stop: &dyn Fn() -> bool,
     ) -> Vec<(PathBuf, bool)> {
         let query = query.trim();
         if query.is_empty() {
             return Vec::new();
         }
-        if let Some(dir) = scope {
-            if let Some(hits) = sc_shell::everything::search_in(dir, query, max) {
-                return hits;
-            }
-            return search_tree(dir, query, max, should_stop);
+        let everything_query = if dirs_only && !query_has_folder_filter(query) {
+            format!("folder: {query}")
+        } else {
+            query.to_string()
+        };
+        let max = max.max(1);
+        let origin = near.or(scope);
+        let fetch = max.saturating_mul(3).clamp(max, 2000);
+
+        if let Some(hits) = everything_hits(&everything_query, max, fetch, scope, origin) {
+            return hits;
         }
-        if let Some(hits) = sc_shell::everything::search(query, max) {
+        if should_stop() {
+            return Vec::new();
+        }
+        if let Some(dir) = scope {
+            let mut hits = search_tree(dir, query, fetch, dirs_only, should_stop);
+            if let Some(origin) = origin {
+                rank_by_proximity(&mut hits, origin);
+            }
+            hits.truncate(max);
             return hits;
         }
         let q = sc_core::query::Query::parse(query);
         let suffix = q.required_name_suffix();
         let pred = |path: &str| q.matches(path);
-        self.search_pred(&pred, suffix.as_deref(), max)
+        let mut hits = self.search_pred(&pred, suffix.as_deref(), fetch, dirs_only);
+        if let Some(origin) = origin {
+            rank_by_proximity(&mut hits, origin);
+        }
+        hits.truncate(max);
+        hits
     }
 
     fn search_pred(
@@ -125,16 +149,17 @@ impl IndexService {
         pred: &dyn Fn(&str) -> bool,
         name_suffix: Option<&str>,
         max: usize,
+        dirs_only: bool,
     ) -> Vec<(PathBuf, bool)> {
         let mut out = Vec::new();
         for index in self.mft.read().iter() {
-            index.search(pred, name_suffix, max, &mut out);
+            index.search(pred, name_suffix, max, dirs_only, &mut out);
             if out.len() >= max {
                 return out;
             }
         }
         if let Some(fb) = self.fallback.read().as_ref() {
-            fb.search(pred, name_suffix, max, &mut out);
+            fb.search(pred, name_suffix, max, dirs_only, &mut out);
         }
         out
     }
@@ -153,6 +178,7 @@ fn search_tree(
     scope: &Path,
     query: &str,
     max: usize,
+    dirs_only: bool,
     should_stop: &dyn Fn() -> bool,
 ) -> Vec<(PathBuf, bool)> {
     let q = sc_core::query::Query::parse(query);
@@ -162,6 +188,9 @@ fn search_tree(
             return false;
         }
         for e in batch {
+            if dirs_only && !e.is_dir() {
+                continue;
+            }
             let full = scope.join(rel).join(&e.name);
             if q.matches(&full.to_string_lossy()) {
                 results.push((full, e.is_dir()));
@@ -173,6 +202,100 @@ fn search_tree(
         true
     });
     results
+}
+
+fn query_has_folder_filter(query: &str) -> bool {
+    query
+        .split_whitespace()
+        .any(|t| t.eq_ignore_ascii_case("folder:") || t.to_ascii_lowercase().starts_with("folder:"))
+}
+
+fn everything_hits(
+    query: &str,
+    max: usize,
+    fetch: usize,
+    scope: Option<&Path>,
+    origin: Option<&Path>,
+) -> Option<Vec<(PathBuf, bool)>> {
+    if let Some(dir) = scope {
+        let mut hits = sc_shell::everything::search_in(dir, query, fetch)?;
+        if let Some(origin) = origin {
+            rank_by_proximity(&mut hits, origin);
+        }
+        hits.truncate(max);
+        return Some(hits);
+    }
+
+    let mut hits = Vec::new();
+    if let Some(dir) = origin {
+        if let Some(local) = sc_shell::everything::search_in(dir, query, fetch) {
+            hits = local;
+        }
+    }
+    match sc_shell::everything::search(query, fetch) {
+        Some(global) => merge_hits(&mut hits, global),
+        None if hits.is_empty() => return None,
+        None => {}
+    }
+    if let Some(origin) = origin {
+        rank_by_proximity(&mut hits, origin);
+    }
+    hits.truncate(max);
+    Some(hits)
+}
+
+fn merge_hits(into: &mut Vec<(PathBuf, bool)>, extra: Vec<(PathBuf, bool)>) {
+    let mut seen: HashSet<String> = into
+        .iter()
+        .map(|(p, _)| p.to_string_lossy().to_ascii_lowercase())
+        .collect();
+    for hit in extra {
+        let key = hit.0.to_string_lossy().to_ascii_lowercase();
+        if seen.insert(key) {
+            into.push(hit);
+        }
+    }
+}
+
+/// Lower score = closer to `origin`. Files in the current folder rank first,
+/// then nested children, then siblings, then farther branches.
+fn rank_by_proximity(hits: &mut Vec<(PathBuf, bool)>, origin: &Path) {
+    hits.sort_by(|(a, _), (b, _)| {
+        path_distance(origin, a)
+            .cmp(&path_distance(origin, b))
+            .then_with(|| a.as_os_str().len().cmp(&b.as_os_str().len()))
+            .then_with(|| a.cmp(b))
+    });
+}
+
+fn path_distance(origin: &Path, hit: &Path) -> (u8, u32) {
+    let origin = path_comps(origin);
+    let hit_dir = path_comps(hit.parent().unwrap_or(hit));
+    if hit_dir.len() >= origin.len() && hit_dir[..origin.len()] == origin[..] {
+        return (0, (hit_dir.len() - origin.len()) as u32);
+    }
+    let common = origin
+        .iter()
+        .zip(hit_dir.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+    (
+        1,
+        (origin.len().saturating_sub(common) + hit_dir.len().saturating_sub(common)) as u32,
+    )
+}
+
+fn path_comps(p: &Path) -> Vec<String> {
+    p.components()
+        .filter_map(|c| match c {
+            std::path::Component::Prefix(pre) => {
+                Some(pre.as_os_str().to_string_lossy().to_ascii_lowercase())
+            }
+            std::path::Component::RootDir => Some("\\".into()),
+            std::path::Component::Normal(s) => Some(s.to_string_lossy().to_ascii_lowercase()),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Scoped content search: walk `scope`, scan files for `needle`
@@ -233,4 +356,25 @@ fn contains_ci(haystack: &[u8], needle_lower: &[u8]) -> bool {
         i += 1;
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn closer_paths_rank_first() {
+        let origin = PathBuf::from(r"C:\work\proj");
+        let mut hits = vec![
+            (PathBuf::from(r"C:\other\readme.txt"), false),
+            (PathBuf::from(r"C:\work\proj\src\lib.rs"), false),
+            (PathBuf::from(r"C:\work\proj\readme.txt"), false),
+            (PathBuf::from(r"C:\work\notes.txt"), false),
+        ];
+        rank_by_proximity(&mut hits, &origin);
+        assert_eq!(hits[0].0, PathBuf::from(r"C:\work\proj\readme.txt"));
+        assert_eq!(hits[1].0, PathBuf::from(r"C:\work\proj\src\lib.rs"));
+        assert_eq!(hits[2].0, PathBuf::from(r"C:\work\notes.txt"));
+        assert_eq!(hits[3].0, PathBuf::from(r"C:\other\readme.txt"));
+    }
 }

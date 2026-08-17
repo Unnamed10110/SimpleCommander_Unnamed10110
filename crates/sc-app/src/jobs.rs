@@ -36,6 +36,8 @@ pub enum Job {
         query: String,
         max: usize,
         scope: Option<PathBuf>,
+        dirs_only: bool,
+        near: Option<PathBuf>,
     },
     ContentSearch {
         query_id: u64,
@@ -260,7 +262,7 @@ fn run_job(
             let size = sc_shell::enumerate::dir_size(&path, &|| false);
             send(UiMsg::DirSize { path, size });
         }
-        Job::SearchNames { query_id, query, max, scope } => {
+        Job::SearchNames { query_id, query, max, scope, dirs_only, near } => {
             if epoch.load(Ordering::SeqCst) != query_id {
                 return;
             }
@@ -268,6 +270,8 @@ fn run_job(
                 &query,
                 max.max(1),
                 scope.as_deref(),
+                dirs_only,
+                near.as_deref(),
                 &|| epoch.load(Ordering::SeqCst) != query_id,
             );
             if epoch.load(Ordering::SeqCst) == query_id {

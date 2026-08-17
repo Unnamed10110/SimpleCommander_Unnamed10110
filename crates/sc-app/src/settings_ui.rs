@@ -441,15 +441,56 @@ fn search_page(app: &mut ScApp, ui: &mut egui::Ui, persist: &mut bool) {
     ui.weak("Index on/off takes effect the next time SimpleCommander starts.");
     ui.add_space(6.0);
     if sc_shell::everything::is_running() {
-        ui.label("Everything is running — Ctrl+F uses its index.");
+        ui.label(format!(
+            "Everything is running — {} uses its index.",
+            app.settings.keymap.search.label()
+        ));
     } else if sc_shell::everything::is_installed() {
         ui.weak("Everything is installed but not running. It will be started when you search.");
     } else {
-        ui.weak("Everything is not installed. Ctrl+F falls back to the built-in index.");
+        ui.weak(format!(
+            "Everything is not installed. {} falls back to the built-in index.",
+            app.settings.keymap.search.label()
+        ));
         ui.add_space(4.0);
         if ui.button("Download Everything…").clicked() {
             sc_shell::everything::open_download_page();
         }
+    }
+    ui.add_space(8.0);
+    ui.label("Everything.exe");
+    ui.horizontal(|ui| {
+        let mut path = app.settings.everything_exe.clone();
+        if ui
+            .add(TextEdit::singleline(&mut path).desired_width(360.0).hint_text("Auto-detect"))
+            .changed()
+        {
+            app.settings.everything_exe = path;
+            *persist = true;
+        }
+        if ui.button("Browse…").clicked() {
+            if let Some(file) = rfd::FileDialog::new()
+                .add_filter("Everything", &["exe"])
+                .pick_file()
+            {
+                app.settings.everything_exe = file.display().to_string();
+                *persist = true;
+            }
+        }
+        if ui.small_button("Auto-detect").clicked() {
+            app.settings.everything_exe.clear();
+            *persist = true;
+        }
+    });
+    if let Some(resolved) = sc_shell::everything::resolved_exe() {
+        ui.weak(format!("Using {}", resolved.display()));
+    } else if app.settings.everything_exe.trim().is_empty() {
+        ui.weak("No Everything.exe found. Search will use the built-in index.");
+    } else {
+        ui.colored_label(
+            Color32::from_rgb(0xff, 0x88, 0x66),
+            "That path is not an existing .exe — auto-detect will be used if possible.",
+        );
     }
     ui.add_space(6.0);
     let mut ask = !app.settings.everything_prompt_dismissed;

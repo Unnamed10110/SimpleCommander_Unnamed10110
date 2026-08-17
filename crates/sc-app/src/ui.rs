@@ -164,6 +164,10 @@ fn handle_global_keys(app: &mut ScApp, ctx: &egui::Context) {
     if km.search.consume(ctx) {
         app.open_search();
     }
+    if km.filter.consume(ctx) {
+        app.search.open = false;
+        app.filter_focus = Some(app.active_pane);
+    }
     if typing || app.new_item.is_some() {
         return;
     }
@@ -642,6 +646,14 @@ fn top_bar(app: &mut ScApp, ui: &mut Ui) {
                 }
             });
             ui.menu_button("Tools", |ui| {
+                if ui
+                    .button(format!("Filter\t{}", app.settings.keymap.filter.label()))
+                    .clicked()
+                {
+                    app.search.open = false;
+                    app.filter_focus = Some(app.active_pane);
+                    ui.close();
+                }
                 if ui
                     .button(format!("Search...\t{}", app.settings.keymap.search.label()))
                     .clicked()
@@ -1458,7 +1470,7 @@ fn address_bar(app: &mut ScApp, ui: &mut Ui, pane: usize) {
 
         let mut filter = app.panes[pane].tab().filter.clone();
         let mut output = TextEdit::singleline(&mut filter)
-            .hint_text("Filter *")
+            .hint_text(format!("Filter * ({})", app.settings.keymap.filter.label()))
             .clip_text(true)
             .desired_width(filter_w)
             .show(ui);
@@ -1536,6 +1548,15 @@ fn visible_columns(app: &ScApp, plugin_columns: &[(usize, String)]) -> Vec<ColKi
         }
     }
     out
+}
+
+/// Make a table cell's interact rect cover the whole cell, not just the label.
+fn row_cell(row: &mut egui_extras::TableRow<'_, '_>, add: impl FnOnce(&mut Ui)) {
+    row.col(|ui| {
+        ui.expand_to_include_rect(ui.max_rect());
+        add(ui);
+        ui.expand_to_include_rect(ui.max_rect());
+    });
 }
 
 fn col_spec(kind: &ColKind) -> Column {
@@ -1823,7 +1844,7 @@ fn file_table(app: &mut ScApp, ui: &mut Ui, pane: usize) {
                     row.set_selected(selected);
 
                     if has_index {
-                    row.col(|ui| {
+                    row_cell(&mut row, |ui| {
                         ui.with_layout(
                             egui::Layout::right_to_left(egui::Align::Center),
                             |ui| {
@@ -1839,7 +1860,7 @@ fn file_table(app: &mut ScApp, ui: &mut Ui, pane: usize) {
                     }
 
                     if show_icons {
-                    row.col(|ui| {
+                    row_cell(&mut row, |ui| {
                         let ext = entry.ext();
                         let per_file = sc_shell::icons::needs_per_file_icon(ext);
                         let key = if entry.is_dir() {
@@ -1890,7 +1911,7 @@ fn file_table(app: &mut ScApp, ui: &mut Ui, pane: usize) {
                     match col {
                     ColKind::Index => {}
                     ColKind::Name => {
-                    row.col(|ui| {
+                    row_cell(&mut row, |ui| {
                         let renaming = app
                             .rename
                             .as_ref()
@@ -1942,7 +1963,7 @@ fn file_table(app: &mut ScApp, ui: &mut Ui, pane: usize) {
                     });
                     }
                     ColKind::Size => {
-                    row.col(|ui| {
+                    row_cell(&mut row, |ui| {
                         if entry.is_dir() {
                             if let Some(sz) = app.folder_sizes.get(&dir_path.join(&entry.name)) {
                                 ui.add(egui::Label::new(RichText::new(format_size(*sz)).weak()).selectable(false));
@@ -1953,22 +1974,22 @@ fn file_table(app: &mut ScApp, ui: &mut Ui, pane: usize) {
                     });
                     }
                     ColKind::Type => {
-                    row.col(|ui| {
+                    row_cell(&mut row, |ui| {
                         ui.add(egui::Label::new(RichText::new(if entry.is_dir() { "dir" } else { entry.ext() }).weak()).selectable(false));
                     });
                     }
                     ColKind::Modified => {
-                    row.col(|ui| {
+                    row_cell(&mut row, |ui| {
                         ui.add(egui::Label::new(RichText::new(format_time(entry.modified)).weak()).selectable(false));
                     });
                     }
                     ColKind::Created => {
-                    row.col(|ui| {
+                    row_cell(&mut row, |ui| {
                         ui.add(egui::Label::new(RichText::new(format_time(entry.created)).weak()).selectable(false));
                     });
                     }
                     ColKind::Checksum => {
-                    row.col(|ui| {
+                    row_cell(&mut row, |ui| {
                         if entry.is_dir() {
                             return;
                         }
@@ -1997,7 +2018,7 @@ fn file_table(app: &mut ScApp, ui: &mut Ui, pane: usize) {
                     });
                     }
                     ColKind::Plugin(pi, _) => {
-                        row.col(|ui| {
+                        row_cell(&mut row, |ui| {
                             let full = dir_path.join(&entry.name);
                             match app.column_values.get(&(*pi, full.clone())) {
                                 Some(Some(v)) => {
@@ -2017,12 +2038,41 @@ fn file_table(app: &mut ScApp, ui: &mut Ui, pane: usize) {
                     }
                     }
 
-                    // Row interactions.
+                    // Row interactions. Hit the full row, not just the name/icon widgets.
                     let resp = row.response();
-                    row_rects.push((vpos, resp.rect));
-                    if resp.contains_pointer() {
+                    let mut row_rect = resp.rect;
+                    row_rect.min.x = table_rect.min.x;
+                    row_rect.max.x = (table_rect.max.x - 16.0).max(resp.rect.max.x);
+                    row_rects.push((vpos, row_rect));
+                    let pointer_in_row = resp.contains_pointer()
+                        || resp.ctx.rect_contains_pointer(resp.layer_id, row_rect);
+                    if pointer_in_row {
                         pointer_on_row = true;
                     }
+                    let (clicked, double_clicked, secondary_clicked, middle_clicked) =
+                        if resp.clicked()
+                            || resp.double_clicked()
+                            || resp.secondary_clicked()
+                            || resp.middle_clicked()
+                        {
+                            (
+                                resp.clicked(),
+                                resp.double_clicked(),
+                                resp.secondary_clicked(),
+                                resp.middle_clicked(),
+                            )
+                        } else if pointer_in_row {
+                            resp.ctx.input(|i| {
+                                (
+                                    i.pointer.primary_clicked(),
+                                    i.pointer.button_double_clicked(egui::PointerButton::Primary),
+                                    i.pointer.button_clicked(egui::PointerButton::Secondary),
+                                    i.pointer.button_clicked(egui::PointerButton::Middle),
+                                )
+                            })
+                        } else {
+                            (false, false, false, false)
+                        };
                     if entry.is_dir() {
                         if let Some(drag) = resp.dnd_hover_payload::<FileDrag>() {
                             let dest = dir_path.join(&entry.name);
@@ -2037,7 +2087,7 @@ fn file_table(app: &mut ScApp, ui: &mut Ui, pane: usize) {
                                 egui::Id::new("dir-drop"),
                             ))
                             .rect_stroke(
-                                resp.rect,
+                                row_rect,
                                 4.0,
                                 egui::Stroke::new(2.0, color),
                                 egui::StrokeKind::Inside,
@@ -2072,9 +2122,9 @@ fn file_table(app: &mut ScApp, ui: &mut Ui, pane: usize) {
                         } else if app.rename.is_none() {
                             action.start_marquee = true;
                         }
-                    } else if resp.double_clicked() {
+                    } else if double_clicked {
                         action.open = Some(ei);
-                    } else if resp.clicked() {
+                    } else if clicked {
                         let mods = resp.ctx.input(|i| i.modifiers);
                         if mods.ctrl {
                             action.toggle = Some((ei, vpos));
@@ -2088,7 +2138,7 @@ fn file_table(app: &mut ScApp, ui: &mut Ui, pane: usize) {
                         }
                     }
                     let shift_rclick = resp.ctx.input(|i| i.modifiers.shift);
-                    if resp.secondary_clicked() {
+                    if secondary_clicked {
                         row_got_secondary = true;
                         action.context_on = Some(ei);
                         action.row_menu_pos = resp.ctx.pointer_interact_pos();
@@ -2098,7 +2148,7 @@ fn file_table(app: &mut ScApp, ui: &mut Ui, pane: usize) {
                     }
                     let is_zip = !entry.is_dir()
                         && ext_is_zip(&entry.name);
-                    if resp.middle_clicked() && (entry.is_dir() || is_zip) {
+                    if middle_clicked && (entry.is_dir() || is_zip) {
                         action.open_new_tab = Some(dir_path.join(&entry.name));
                     }
                 });

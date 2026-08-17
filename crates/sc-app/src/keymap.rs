@@ -213,6 +213,7 @@ pub enum ShortcutId {
     Refresh,
     SwitchPane,
     NewFolder,
+    Filter,
     Search,
     Palette,
     Settings,
@@ -246,6 +247,7 @@ pub const SHORTCUT_ROWS: &[(ShortcutId, &str)] = &[
     (ShortcutId::Refresh, "Refresh"),
     (ShortcutId::SwitchPane, "Switch pane"),
     (ShortcutId::NewFolder, "New folder"),
+    (ShortcutId::Filter, "Filter"),
     (ShortcutId::Search, "Search"),
     (ShortcutId::Palette, "Quick jump"),
     (ShortcutId::Settings, "Settings"),
@@ -281,6 +283,7 @@ pub struct Keymap {
     pub refresh: Chord,
     pub switch_pane: Chord,
     pub new_folder: Chord,
+    pub filter: Chord,
     pub search: Chord,
     pub palette: Chord,
     pub settings: Chord,
@@ -316,7 +319,8 @@ impl Default for Keymap {
             refresh: Chord::new(false, false, false, "F5"),
             switch_pane: Chord::new(false, false, false, "F6"),
             new_folder: Chord::new(false, false, false, "F7"),
-            search: Chord::new(true, false, false, "F"),
+            filter: Chord::new(true, false, false, "F"),
+            search: Chord::new(true, false, true, "F"),
             palette: Chord::new(true, false, false, "P"),
             settings: Chord::new(true, false, false, "Comma"),
             new_tab: Chord::new(true, false, false, "T"),
@@ -353,6 +357,7 @@ impl Keymap {
             ShortcutId::Refresh => &self.refresh,
             ShortcutId::SwitchPane => &self.switch_pane,
             ShortcutId::NewFolder => &self.new_folder,
+            ShortcutId::Filter => &self.filter,
             ShortcutId::Search => &self.search,
             ShortcutId::Palette => &self.palette,
             ShortcutId::Settings => &self.settings,
@@ -388,6 +393,7 @@ impl Keymap {
             ShortcutId::Refresh => &mut self.refresh,
             ShortcutId::SwitchPane => &mut self.switch_pane,
             ShortcutId::NewFolder => &mut self.new_folder,
+            ShortcutId::Filter => &mut self.filter,
             ShortcutId::Search => &mut self.search,
             ShortcutId::Palette => &mut self.palette,
             ShortcutId::Settings => &mut self.settings,
@@ -425,6 +431,16 @@ impl Keymap {
         }
         None
     }
+
+    /// Older builds bound Search to Ctrl+F. If a saved keymap still has that
+    /// and Filter is the new Ctrl+F default, move Search to Ctrl+Shift+F.
+    pub fn migrate_filter_shortcut(&mut self) {
+        let ctrl_f = Chord::new(true, false, false, "F");
+        let ctrl_shift_f = Chord::new(true, false, true, "F");
+        if self.search == ctrl_f && self.filter == ctrl_f {
+            self.search = ctrl_shift_f;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -460,8 +476,20 @@ mod tests {
         let s = toml::to_string(&km).unwrap();
         let back: Keymap = toml::from_str(&s).unwrap();
         assert_eq!(back.new_folder.to_storage(), "F7");
+        assert_eq!(back.filter.to_storage(), "Ctrl+F");
+        assert_eq!(back.search.to_storage(), "Ctrl+Shift+F");
         assert_eq!(back.copy_paths.to_storage(), "Ctrl+Shift+C");
         assert_eq!(back.settings.to_storage(), "Ctrl+Comma");
+    }
+
+    #[test]
+    fn migrate_old_ctrl_f_search() {
+        let mut km = Keymap::default();
+        km.search = Chord::new(true, false, false, "F");
+        km.filter = Chord::new(true, false, false, "F");
+        km.migrate_filter_shortcut();
+        assert_eq!(km.filter.to_storage(), "Ctrl+F");
+        assert_eq!(km.search.to_storage(), "Ctrl+Shift+F");
     }
 
     #[test]

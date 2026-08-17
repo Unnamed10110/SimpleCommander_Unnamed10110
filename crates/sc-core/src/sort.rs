@@ -84,14 +84,28 @@ fn trim_zeros(s: &[u8]) -> &[u8] {
     if n == s.len() { &s[s.len() - 1..] } else { &s[n..] }
 }
 
-/// Compare two entries under a sort spec.
-pub fn entry_cmp(a: &FsEntry, b: &FsEntry, spec: SortSpec) -> Ordering {
-    if spec.dirs_first {
-        match (a.is_dir(), b.is_dir()) {
-            (true, false) => return Ordering::Less,
-            (false, true) => return Ordering::Greater,
-            _ => {}
+/// Directory indices first, then files, preserving relative order within each group.
+pub fn dirs_first_indices(entries: &[FsEntry]) -> Vec<u32> {
+    let mut dirs = Vec::new();
+    let mut files = Vec::new();
+    for (i, e) in entries.iter().enumerate() {
+        if e.is_dir() {
+            dirs.push(i as u32);
+        } else {
+            files.push(i as u32);
         }
+    }
+    dirs.extend(files);
+    dirs
+}
+
+/// Compare two entries under a sort spec.
+/// Directories always sort before files, regardless of column or direction.
+pub fn entry_cmp(a: &FsEntry, b: &FsEntry, spec: SortSpec) -> Ordering {
+    match (a.is_dir(), b.is_dir()) {
+        (true, false) => return Ordering::Less,
+        (false, true) => return Ordering::Greater,
+        _ => {}
     }
     let ord = match spec.key {
         SortKey::Name => natural_cmp(&a.name, &b.name),
@@ -224,5 +238,56 @@ mod tests {
         assert!(!Wildcard::new("*.rs").matches("main.rc"));
         assert!(Wildcard::new("ma?n").matches("main"));
         assert!(Wildcard::new("main").matches("domain main.txt")); // substring mode
+    }
+
+    fn entry(name: &str, dir: bool) -> FsEntry {
+        FsEntry {
+            name: name.into(),
+            size: if dir { 0 } else { 42 },
+            modified: 0,
+            created: 0,
+            attributes: if dir { crate::entry::ATTR_DIRECTORY } else { 0 },
+        }
+    }
+
+    #[test]
+    fn folders_always_sort_first() {
+        let entries = [
+            entry("z.txt", false),
+            entry("b", true),
+            entry("a.txt", false),
+            entry("a", true),
+        ];
+        for spec in [
+            SortSpec { key: SortKey::Name, ascending: true, dirs_first: false },
+            SortSpec { key: SortKey::Name, ascending: false, dirs_first: false },
+            SortSpec { key: SortKey::Size, ascending: true, dirs_first: false },
+            SortSpec { key: SortKey::Type, ascending: true, dirs_first: false },
+        ] {
+            let view = build_view(&entries, spec, "", true);
+            let names: Vec<&str> = view
+                .iter()
+                .map(|&i| entries[i as usize].name.as_str())
+                .collect();
+            let split = names.iter().position(|n| !entries.iter().find(|e| e.name == *n).unwrap().is_dir());
+            let split = split.unwrap_or(names.len());
+            assert!(
+                names[..split].iter().all(|n| entries.iter().find(|e| e.name == *n).unwrap().is_dir()),
+                "dirs first failed for {spec:?}: {names:?}"
+            );
+            assert!(
+                names[split..].iter().all(|n| !entries.iter().find(|e| e.name == *n).unwrap().is_dir()),
+                "files after dirs failed for {spec:?}: {names:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn dirs_first_indices_keeps_folders_on_top() {
+        let entries = [entry("file.txt", false), entry("folder", true), entry("a.doc", false)];
+        let idx = dirs_first_indices(&entries);
+        assert!(entries[idx[0] as usize].is_dir());
+        assert!(!entries[idx[1] as usize].is_dir());
+        assert!(!entries[idx[2] as usize].is_dir());
     }
 }

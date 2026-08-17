@@ -1,6 +1,12 @@
 # Build the reference WASM plugins and copy them to plugins/dist.
 # Requires: rustup target add wasm32-unknown-unknown
 $ErrorActionPreference = "Stop"
+
+$cargoBin = Join-Path $env:USERPROFILE ".cargo\bin"
+if (Test-Path -LiteralPath (Join-Path $cargoBin "cargo.exe")) {
+    $env:Path = "$cargoBin;$env:Path"
+}
+
 Push-Location "$PSScriptRoot\plugins"
 try {
     rustup target add wasm32-unknown-unknown | Out-Null

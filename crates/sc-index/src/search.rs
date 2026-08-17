@@ -97,6 +97,7 @@ impl IndexService {
     /// Instant name/path search. Uses Everything when it is installed/running.
     /// When `dirs_only` is set, only folders are returned (and count toward `max`).
     /// `near` ranks hits closest to that directory first (current folder).
+    /// `quick` does a single Everything query (for the Ctrl+P palette).
     pub fn search_names(
         &self,
         query: &str,
@@ -104,6 +105,7 @@ impl IndexService {
         scope: Option<&Path>,
         dirs_only: bool,
         near: Option<&Path>,
+        quick: bool,
         should_stop: &dyn Fn() -> bool,
     ) -> Vec<(PathBuf, bool)> {
         let query = query.trim();
@@ -117,9 +119,13 @@ impl IndexService {
         };
         let max = max.max(1);
         let origin = near.or(scope);
-        let fetch = max.saturating_mul(3).clamp(max, 2000);
+        let fetch = if quick {
+            max
+        } else {
+            max.saturating_mul(3).clamp(max, 2000)
+        };
 
-        if let Some(hits) = everything_hits(&everything_query, max, fetch, scope, origin) {
+        if let Some(hits) = everything_hits(&everything_query, max, fetch, scope, origin, quick) {
             return hits;
         }
         if should_stop() {
@@ -216,7 +222,16 @@ fn everything_hits(
     fetch: usize,
     scope: Option<&Path>,
     origin: Option<&Path>,
+    quick: bool,
 ) -> Option<Vec<(PathBuf, bool)>> {
+    if quick {
+        let mut hits = sc_shell::everything::search(query, fetch)?;
+        if let Some(origin) = origin {
+            rank_by_proximity(&mut hits, origin);
+        }
+        hits.truncate(max);
+        return Some(hits);
+    }
     if let Some(dir) = scope {
         let mut hits = sc_shell::everything::search_in(dir, query, fetch)?;
         if let Some(origin) = origin {

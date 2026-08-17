@@ -10,7 +10,7 @@ use crate::tags::TagStore;
 use crate::theme::{self, Theme};
 use egui::TextureHandle;
 use sc_core::snapshot::DirSnapshot;
-use sc_core::sort::{SortKey, SortSpec};
+use sc_core::sort::{dirs_first_indices, SortKey, SortSpec};
 use sc_core::state::{PaneLayout, PaneState, Session, SessionPane, SessionTab, SplitDirection, TabState};
 use sc_ops::queue::{ConflictResolution, OpEngine, OpEvent, OpOrigin, Operation};
 use sc_ops::undo::UndoJournal;
@@ -547,6 +547,40 @@ impl ScApp {
         self.request_listing(pane, false);
     }
 
+    /// Go back in history and select the folder we just left.
+    pub fn history_back(&mut self, pane: usize) {
+        self.leave_and_select(pane, |tab| tab.go_back());
+    }
+
+    pub fn history_forward(&mut self, pane: usize) {
+        if self.panes[pane].tab_mut().go_forward() {
+            self.request_listing(pane, false);
+        }
+    }
+
+    /// Go to the parent folder and select the directory we came from.
+    pub fn go_parent(&mut self, pane: usize) -> bool {
+        self.leave_and_select(pane, |tab| tab.go_up())
+    }
+
+    fn leave_and_select(&mut self, pane: usize, nav: impl FnOnce(&mut TabState) -> bool) -> bool {
+        let tab = self.panes[pane].tab();
+        let name = tab
+            .path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned());
+        let uid = tab.uid;
+        if nav(self.panes[pane].tab_mut()) {
+            if let Some(name) = name {
+                self.pending_select = Some((uid, vec![name]));
+            }
+            self.request_listing(pane, false);
+            true
+        } else {
+            false
+        }
+    }
+
     fn remember_unc(&mut self, path: &Path) {
         let s = path.to_string_lossy();
         if !s.starts_with("\\\\") {
@@ -921,12 +955,13 @@ impl ScApp {
                         file_bytes: 0,
                     };
                     tab.snapshot.recompute_counts();
-                    tab.view = Arc::new((0..tab.snapshot.entries.len() as u32).collect());
+                    tab.view = Arc::new(dirs_first_indices(&tab.snapshot.entries));
                     if done {
                         tab.loading = false;
                         tab.pending = Vec::new();
                         self.rebuild_view(pane);
                     }
+                    self.try_select_pending(pane, ti);
                 }
             }
             UiMsg::View { token, view } => {
@@ -1510,6 +1545,7 @@ impl ScApp {
                     scope: None,
                     dirs_only: false,
                     near: Some(self.active_tab().path.clone()),
+                    quick: false,
                 });
             }
             SearchMode::NameHere => {
@@ -1521,6 +1557,7 @@ impl ScApp {
                     scope: Some(scope.clone()),
                     dirs_only: false,
                     near: Some(scope),
+                    quick: false,
                 });
             }
             SearchMode::Content => {
@@ -1539,20 +1576,33 @@ impl ScApp {
     pub fn run_palette(&mut self) {
         let query = self.palette.query.trim().to_string();
         if query.is_empty() {
-            self.palette.results.clear();
+            self.palette.results = self.palette_local_dirs();
+            self.palette.selected = 0;
             return;
         }
         let id = self.engine.new_search();
         self.palette.query_id = id;
-        let max = self.settings.search_max_results.max(1);
         self.engine.submit(Job::SearchNames {
             query_id: id,
             query,
-            max,
+            max: 40,
             scope: None,
             dirs_only: true,
             near: Some(self.active_tab().path.clone()),
+            quick: true,
         });
+    }
+
+    fn palette_local_dirs(&self) -> Vec<(PathBuf, bool)> {
+        let tab = self.active_tab();
+        tab.view
+            .iter()
+            .filter_map(|&i| {
+                let e = tab.snapshot.entries.get(i as usize)?;
+                e.is_dir()
+                    .then(|| (tab.path.join(&e.name), true))
+            })
+            .collect()
     }
 
     /// Open a search hit: files in the shell, folders in a new tab.

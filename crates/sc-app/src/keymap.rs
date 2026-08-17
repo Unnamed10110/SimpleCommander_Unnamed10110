@@ -17,11 +17,22 @@ impl Chord {
         Self { ctrl, alt, shift, key: key.into() }
     }
 
+    pub fn unbound() -> Self {
+        Self { ctrl: false, alt: false, shift: false, key: String::new() }
+    }
+
+    pub fn is_unbound(&self) -> bool {
+        self.key.is_empty()
+    }
+
     pub fn key(&self) -> Option<Key> {
         parse_key(&self.key)
     }
 
     pub fn label(&self) -> String {
+        if self.is_unbound() {
+            return "None".into();
+        }
         let mut s = String::new();
         if self.ctrl {
             s.push_str("Ctrl+");
@@ -49,6 +60,9 @@ impl Chord {
 
     /// Stable `Ctrl+Shift+C` / `F7` form written to settings.toml.
     pub fn to_storage(&self) -> String {
+        if self.is_unbound() {
+            return String::new();
+        }
         let mut s = String::new();
         if self.ctrl {
             s.push_str("Ctrl+");
@@ -64,6 +78,9 @@ impl Chord {
     }
 
     pub fn parse(s: &str) -> Option<Self> {
+        if s.trim().is_empty() {
+            return Some(Self::unbound());
+        }
         let mut ctrl = false;
         let mut alt = false;
         let mut shift = false;
@@ -275,7 +292,7 @@ pub const SHORTCUT_ROWS: &[(ShortcutId, &str)] = &[
     (ShortcutId::ParentFolder, "Parent folder"),
 ];
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Keymap {
     pub open_terminal: Chord,
@@ -343,8 +360,8 @@ impl Default for Keymap {
             history_forward: Chord::new(false, true, false, "ArrowRight"),
             delete: Chord::new(false, false, false, "Delete"),
             delete_permanent: Chord::new(false, false, true, "Delete"),
-            enter_folder: Chord::new(false, false, false, "ArrowRight"),
-            parent_folder: Chord::new(false, false, false, "ArrowLeft"),
+            enter_folder: Chord::unbound(),
+            parent_folder: Chord::unbound(),
         }
     }
 }
@@ -441,6 +458,19 @@ impl Keymap {
             self.search = ctrl_shift_f;
         }
     }
+
+    /// Older builds used ArrowLeft/ArrowRight alone to leave/enter folders.
+    /// History is Alt+Arrows; Enter still opens the focused item.
+    pub fn migrate_bare_arrow_nav(&mut self) {
+        let left = Chord::new(false, false, false, "ArrowLeft");
+        let right = Chord::new(false, false, false, "ArrowRight");
+        if self.parent_folder == left {
+            self.parent_folder = Chord::unbound();
+        }
+        if self.enter_folder == right {
+            self.enter_folder = Chord::unbound();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -456,12 +486,16 @@ mod tests {
         assert!(Chord::parse("F7").unwrap().key().is_some());
         assert!(Chord::parse("Alt+ArrowLeft").is_some());
         assert!(Chord::parse("Ctrl+,").is_some());
+        assert!(Chord::parse("").unwrap().is_unbound());
     }
 
     #[test]
     fn defaults_all_resolve() {
         let km = Keymap::default();
         for (id, label) in SHORTCUT_ROWS {
+            if km.get(*id).is_unbound() {
+                continue;
+            }
             assert!(
                 km.get(*id).key().is_some(),
                 "{label}: {}",
@@ -490,6 +524,16 @@ mod tests {
         km.migrate_filter_shortcut();
         assert_eq!(km.filter.to_storage(), "Ctrl+F");
         assert_eq!(km.search.to_storage(), "Ctrl+Shift+F");
+    }
+
+    #[test]
+    fn migrate_bare_arrow_nav() {
+        let mut km = Keymap::default();
+        km.parent_folder = Chord::new(false, false, false, "ArrowLeft");
+        km.enter_folder = Chord::new(false, false, false, "ArrowRight");
+        km.migrate_bare_arrow_nav();
+        assert!(km.parent_folder.is_unbound());
+        assert!(km.enter_folder.is_unbound());
     }
 
     #[test]

@@ -269,9 +269,10 @@ pub fn load_settings() -> Settings {
             visible: false,
         });
     }
-    let search_before = settings.keymap.search.clone();
+    let keymap_before = settings.keymap.clone();
     settings.keymap.migrate_filter_shortcut();
-    if settings.keymap.search != search_before {
+    settings.keymap.migrate_bare_arrow_nav();
+    if settings.keymap != keymap_before {
         save_settings(&settings);
     }
     settings

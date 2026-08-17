@@ -157,6 +157,10 @@ fn handle_global_keys(app: &mut ScApp, ctx: &egui::Context) {
     if km.palette.consume(ctx) {
         app.palette.open = !app.palette.open;
         app.palette.focus_requested = true;
+        if app.palette.open {
+            sc_shell::everything::warmup();
+            app.run_palette();
+        }
     }
     if km.settings.consume(ctx) {
         app.show_settings = !app.show_settings;
@@ -168,7 +172,7 @@ fn handle_global_keys(app: &mut ScApp, ctx: &egui::Context) {
         app.search.open = false;
         app.filter_focus = Some(app.active_pane);
     }
-    if typing || app.new_item.is_some() {
+    if typing || app.new_item.is_some() || app.palette.open || app.search.open {
         return;
     }
 
@@ -207,19 +211,13 @@ fn handle_global_keys(app: &mut ScApp, ctx: &egui::Context) {
         || ctx.input_mut(|i| i.consume_key(Modifiers::ALT, Key::ArrowUp)))
         && !sc_shell::recycle::is_recycle_path(&app.panes[pane].tab().path)
     {
-        if app.panes[pane].tab_mut().go_up() {
-            app.request_listing(pane, false);
-        }
+        app.go_parent(pane);
     }
     if km.history_back.consume(ctx) {
-        if app.panes[pane].tab_mut().go_back() {
-            app.request_listing(pane, false);
-        }
+        app.history_back(pane);
     }
     if km.history_forward.consume(ctx) {
-        if app.panes[pane].tab_mut().go_forward() {
-            app.request_listing(pane, false);
-        }
+        app.history_forward(pane);
     }
     if km.select_all.consume(ctx) {
         let tab = app.panes[pane].tab_mut();
@@ -376,6 +374,9 @@ fn list_navigation_keys(app: &mut ScApp, ctx: &egui::Context, pane: usize) {
 }
 
 fn type_ahead(app: &mut ScApp, ctx: &egui::Context, pane: usize) {
+    if ctx.input(|i| i.modifiers.ctrl || i.modifiers.command || i.modifiers.alt) {
+        return;
+    }
     let texts: Vec<String> = ctx.input(|i| {
         i.events
             .iter()
@@ -388,20 +389,42 @@ fn type_ahead(app: &mut ScApp, ctx: &egui::Context, pane: usize) {
     if texts.is_empty() {
         return;
     }
-    if app.type_ahead_at.elapsed().as_millis() as u64 > app.settings.type_ahead_ms.max(100) {
+    let incoming = texts.concat();
+    if incoming.trim().is_empty() {
+        return;
+    }
+    let timed_out =
+        app.type_ahead_at.elapsed().as_millis() as u64 > app.settings.type_ahead_ms.max(100);
+    if timed_out {
         app.type_ahead.clear();
     }
     app.type_ahead_at = std::time::Instant::now();
-    for t in texts {
-        app.type_ahead.push_str(&t);
+
+    let incoming_lower = incoming.to_lowercase();
+    let same_letter = incoming_lower.chars().count() == 1
+        && !app.type_ahead.is_empty()
+        && app.type_ahead.to_lowercase() == incoming_lower;
+    let cycle = same_letter && !timed_out;
+    if !cycle {
+        app.type_ahead.push_str(&incoming);
     }
     let needle = app.type_ahead.to_lowercase();
     let tab = app.panes[pane].tab_mut();
-    if let Some(pos) = tab
-        .view
-        .iter()
-        .position(|&i| tab.snapshot.entries[i as usize].name.to_lowercase().starts_with(&needle))
-    {
+    if tab.view.is_empty() {
+        return;
+    }
+    let n = tab.view.len();
+    let start = if cycle {
+        tab.cursor.map(|c| (c + 1) % n).unwrap_or(0)
+    } else {
+        0
+    };
+    let pos = (0..n).find_map(|off| {
+        let i = (start + off) % n;
+        let e = tab.snapshot.entries.get(tab.view[i] as usize)?;
+        e.name.to_lowercase().starts_with(&needle).then_some(i)
+    });
+    if let Some(pos) = pos {
         let entry = tab.view[pos];
         tab.selection.clear();
         tab.selection.insert(entry);
@@ -615,22 +638,16 @@ fn top_bar(app: &mut ScApp, ui: &mut Ui) {
                 let pane = app.active_pane;
                 let km = app.settings.keymap.clone();
                 if ui.button(format!("Back\t{}", km.history_back.label())).clicked() {
-                    if app.panes[pane].tab_mut().go_back() {
-                        app.request_listing(pane, false);
-                    }
+                    app.history_back(pane);
                     ui.close();
                 }
                 if ui.button(format!("Forward\t{}", km.history_forward.label())).clicked() {
-                    if app.panes[pane].tab_mut().go_forward() {
-                        app.request_listing(pane, false);
-                    }
+                    app.history_forward(pane);
                     ui.close();
                 }
                 if ui.button(format!("Up\t{}", km.go_up.label())).clicked() {
-                    if !sc_shell::recycle::is_recycle_path(&app.panes[pane].tab().path)
-                        && app.panes[pane].tab_mut().go_up()
-                    {
-                        app.request_listing(pane, false);
+                    if !sc_shell::recycle::is_recycle_path(&app.panes[pane].tab().path) {
+                        app.go_parent(pane);
                     }
                     ui.close();
                 }
@@ -642,6 +659,8 @@ fn top_bar(app: &mut ScApp, ui: &mut Ui) {
                 if ui.button(format!("Quick jump...\t{}", km.palette.label())).clicked() {
                     app.palette.open = true;
                     app.palette.focus_requested = true;
+                    sc_shell::everything::warmup();
+                    app.run_palette();
                     ui.close();
                 }
             });
@@ -1347,19 +1366,16 @@ fn address_bar(app: &mut ScApp, ui: &mut Ui, pane: usize) {
     ui.horizontal(|ui| {
         ui.set_height(22.0);
         if crate::icons::button(ui, crate::icons::Glyph::Back, false, "Back (Alt+Left)").clicked()
-            && app.panes[pane].tab_mut().go_back()
         {
-            app.request_listing(pane, false);
+            app.history_back(pane);
         }
         if crate::icons::button(ui, crate::icons::Glyph::Forward, false, "Forward (Alt+Right)").clicked()
-            && app.panes[pane].tab_mut().go_forward()
         {
-            app.request_listing(pane, false);
+            app.history_forward(pane);
         }
         if crate::icons::button(ui, crate::icons::Glyph::Up, false, "Up (Backspace)").clicked() {
-            let recycle = sc_shell::recycle::is_recycle_path(&app.panes[pane].tab().path);
-            if !recycle && app.panes[pane].tab_mut().go_up() {
-                app.request_listing(pane, false);
+            if !sc_shell::recycle::is_recycle_path(&app.panes[pane].tab().path) {
+                app.go_parent(pane);
             }
         }
         if crate::icons::button(ui, crate::icons::Glyph::Refresh, false, "Refresh (F5)").clicked() {
@@ -3160,11 +3176,43 @@ fn palette_overlay(app: &mut ScApp, ctx: &egui::Context) {
     if !app.palette.open {
         return;
     }
+    let mut dismiss = false;
+    let skip_outside = app.palette.focus_requested;
+
+    egui::Area::new(egui::Id::new("palette-backdrop"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(ctx.content_rect().min)
+        .interactable(true)
+        .show(ctx, |ui| {
+            let rect = ctx.content_rect();
+            let resp = ui.allocate_rect(rect, Sense::click());
+            ui.painter()
+                .rect_filled(rect, 0.0, Color32::from_black_alpha(64));
+            if resp.clicked() && !skip_outside {
+                dismiss = true;
+            }
+        });
+
     egui::Window::new("Quick jump")
         .title_bar(false)
+        .order(egui::Order::Tooltip)
         .anchor(Align2::CENTER_TOP, [0.0, 80.0])
         .fixed_size([520.0, 320.0])
+        .collapsible(false)
         .show(ctx, |ui| {
+            let n = app.palette.results.len();
+            let mut arrow_moved = false;
+            if n > 0 {
+                app.palette.selected = app.palette.selected.min(n - 1);
+                if ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::ArrowDown)) {
+                    app.palette.selected = (app.palette.selected + 1).min(n - 1);
+                    arrow_moved = true;
+                }
+                if ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::ArrowUp)) {
+                    app.palette.selected = app.palette.selected.saturating_sub(1);
+                    arrow_moved = true;
+                }
+            }
             let mut output = TextEdit::singleline(&mut app.palette.query)
                 .id(egui::Id::new("palette-query"))
                 .hint_text("Jump to folder…")
@@ -3173,29 +3221,49 @@ fn palette_overlay(app: &mut ScApp, ctx: &egui::Context) {
             select_all_on_focus(ui, &mut output, &mut app.palette.focus_requested);
             if output.response.changed() {
                 app.run_palette();
-            }
-            let n = app.palette.results.len();
-            if n > 0 {
-                if ui.input(|i| i.key_pressed(Key::ArrowDown)) {
-                    app.palette.selected = (app.palette.selected + 1).min(n - 1);
-                }
-                if ui.input(|i| i.key_pressed(Key::ArrowUp)) {
-                    app.palette.selected = app.palette.selected.saturating_sub(1);
-                }
+                arrow_moved = true;
             }
             ui.separator();
+            let n = app.palette.results.len();
+            if n > 0 {
+                app.palette.selected = app.palette.selected.min(n - 1);
+            }
             let mut go: Option<PathBuf> = None;
-            egui::ScrollArea::vertical().max_height(240.0).show(ui, |ui| {
-                for (i, (path, _)) in app.palette.results.iter().enumerate().take(50) {
-                    if ui
-                        .selectable_label(i == app.palette.selected, path.display().to_string())
-                        .clicked()
-                    {
+            let row_h = ui.spacing().interact_size.y;
+            let row_step = row_h + ui.spacing().item_spacing.y;
+            let list_h = ui.available_height().max(80.0);
+            let mut list = egui::ScrollArea::vertical()
+                .id_salt("palette-results")
+                .max_height(list_h)
+                .auto_shrink([false, false])
+                .animated(false);
+            if arrow_moved && n > 0 {
+                let content_h = (n as f32 * row_step - ui.spacing().item_spacing.y).max(0.0);
+                let max_off = (content_h - list_h).max(0.0);
+                let target = (app.palette.selected as f32 * row_step - (list_h - row_h) * 0.5)
+                    .clamp(0.0, max_off);
+                list = list.vertical_scroll_offset(target);
+            }
+            list.show_rows(ui, row_h, n, |ui, range| {
+                for i in range {
+                    let (path, _) = &app.palette.results[i];
+                    let resp = ui.add(
+                        egui::Button::selectable(
+                            i == app.palette.selected,
+                            path.display().to_string(),
+                        )
+                        .truncate(),
+                    );
+                    if arrow_moved && i == app.palette.selected {
+                        resp.scroll_to_me(Some(egui::Align::Center));
+                    }
+                    if resp.clicked() {
+                        app.palette.selected = i;
                         go = Some(path.clone());
                     }
                 }
             });
-            if ui.input(|i| i.key_pressed(Key::Enter)) {
+            if ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter)) {
                 if let Some((p, _)) = app.palette.results.get(app.palette.selected) {
                     go = Some(p.clone());
                 }
@@ -3203,12 +3271,19 @@ fn palette_overlay(app: &mut ScApp, ctx: &egui::Context) {
             if let Some(p) = go {
                 let pane = app.active_pane;
                 app.navigate(pane, p);
-                app.palette.open = false;
+                dismiss = true;
             }
-            if ui.input(|i| i.key_pressed(Key::Escape)) {
-                app.palette.open = false;
+            if ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+                dismiss = true;
             }
         });
+
+    if dismiss || ctx.input(|i| i.key_pressed(Key::Escape)) {
+        app.palette.open = false;
+        if ctx.input(|i| i.key_pressed(Key::Escape)) {
+            ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
+        }
+    }
 }
 
 fn toasts(app: &mut ScApp, ctx: &egui::Context) {

@@ -232,6 +232,10 @@ pub struct ScApp {
     pub startup_ms: Option<u64>,
     pub volumes: Vec<sc_shell::volumes::VolumeInfo>,
     pub volumes_refreshed: Instant,
+    pub places_pending: bool,
+    pub wsl_distros: Vec<(String, PathBuf)>,
+    pub network_places: Vec<(String, PathBuf)>,
+    pub known_folders: Vec<(String, PathBuf)>,
     pub tree_children: HashMap<PathBuf, Vec<String>>,
     pub tree_open: HashSet<PathBuf>,
     pub tree_pending: HashSet<PathBuf>,
@@ -256,7 +260,7 @@ pub struct ScApp {
     pub pending_select: Option<(u64, Vec<String>)>,
     /// Scroll the file table to the cursor for this tab once.
     pub force_scroll_tab: Option<u64>,
-    /// Rubber-band selection in a file list (drag on empty space or unselected rows).
+    /// Rubber-band selection in a file list (drag on empty space).
     pub marquee: Option<Marquee>,
     /// Name prompt for New file / New folder.
     pub new_item: Option<NewItemPrompt>,
@@ -442,6 +446,10 @@ impl ScApp {
             startup_ms: None,
             volumes: sc_shell::volumes::list_volumes(),
             volumes_refreshed: Instant::now(),
+            places_pending: true,
+            wsl_distros: Vec::new(),
+            network_places: Vec::new(),
+            known_folders: Vec::new(),
             tree_children: HashMap::new(),
             tree_open: HashSet::new(),
             tree_pending: HashSet::new(),
@@ -471,7 +479,17 @@ impl ScApp {
                 app.request_listing_for(pane, tab, false);
             }
         }
+        app.engine.submit(Job::RefreshPlaces);
         app
+    }
+
+    /// Re-enumerate drives/WSL/network off the UI thread, at most every 15s.
+    pub fn maybe_refresh_places(&mut self) {
+        if self.places_pending || self.volumes_refreshed.elapsed().as_secs() < 15 {
+            return;
+        }
+        self.places_pending = true;
+        self.engine.submit(Job::RefreshPlaces);
     }
 
     // ----- listing plumbing ---------------------------------------------
@@ -1081,6 +1099,19 @@ impl ScApp {
                 self.tree_pending.remove(&path);
                 self.tree_children.insert(path, dirs);
             }
+            UiMsg::Places {
+                volumes,
+                wsl,
+                network,
+                known,
+            } => {
+                self.volumes = volumes;
+                self.wsl_distros = wsl;
+                self.network_places = network;
+                self.known_folders = known;
+                self.volumes_refreshed = Instant::now();
+                self.places_pending = false;
+            }
             UiMsg::RecycleMeta { items } => {
                 self.recycle_meta.clear();
                 for item in items {
@@ -1433,12 +1464,11 @@ impl ScApp {
         self.preview.audio_ctl.stop();
         crate::preview::destroy_web(&mut self.preview);
         if let Some(p) = path {
-            if p.is_file() {
-                self.preview.loading = true;
-                self.engine.submit(Job::Preview { path: p, generation: self.preview.generation });
-            } else {
-                self.preview.loading = false;
-            }
+            self.preview.loading = true;
+            self.engine.submit(Job::Preview {
+                path: p,
+                generation: self.preview.generation,
+            });
         } else {
             self.preview.loading = false;
         }

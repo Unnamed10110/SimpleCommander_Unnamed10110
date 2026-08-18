@@ -8,6 +8,7 @@ use sc_core::entry::format_size;
 use std::path::PathBuf;
 
 pub fn draw(app: &mut ScApp, ui: &mut Ui) {
+    app.maybe_refresh_places();
     let inner = egui::Panel::left("sidebar")
         .resizable(true)
         .default_size(app.sidebar_width)
@@ -85,10 +86,6 @@ fn favorites_section(app: &mut ScApp, ui: &mut Ui) {
 }
 
 fn drives_section(app: &mut ScApp, ui: &mut Ui) {
-    if app.volumes_refreshed.elapsed().as_secs() > 15 {
-        app.volumes = sc_shell::volumes::list_volumes();
-        app.volumes_refreshed = std::time::Instant::now();
-    }
     let mut open = app.settings.session.sidebar_drives_open;
     let mut go: Option<PathBuf> = None;
     let mut open_tab: Option<PathBuf> = None;
@@ -143,7 +140,7 @@ fn known_folders_section(app: &mut ScApp, ui: &mut Ui) {
     let resp = egui::CollapsingHeader::new(RichText::new("User folders").strong())
         .open(Some(open))
         .show(ui, |ui| {
-            for (name, path) in sc_shell::volumes::known_folders() {
+            for (name, path) in app.known_folders.clone() {
                 let resp = ui.selectable_label(false, format!("📁 {name}"));
                 if resp.clicked() {
                     go = Some(path.clone());
@@ -179,10 +176,10 @@ fn recycle_row(app: &mut ScApp, ui: &mut Ui) {
 }
 
 fn wsl_section(app: &mut ScApp, ui: &mut Ui) {
-    let distros = sc_shell::volumes::wsl_distros();
-    if distros.is_empty() {
+    if app.wsl_distros.is_empty() {
         return;
     }
+    let distros = app.wsl_distros.clone();
     let mut open = app.settings.session.sidebar_wsl_open;
     let mut go: Option<PathBuf> = None;
     let mut open_tab: Option<PathBuf> = None;
@@ -213,7 +210,7 @@ fn wsl_section(app: &mut ScApp, ui: &mut Ui) {
 }
 
 fn network_section(app: &mut ScApp, ui: &mut Ui) {
-    let mut places = sc_shell::volumes::network_places();
+    let mut places = app.network_places.clone();
     for p in &app.settings.session.unc_roots {
         if !places.iter().any(|(_, q)| q == p) {
             let label = p.display().to_string();

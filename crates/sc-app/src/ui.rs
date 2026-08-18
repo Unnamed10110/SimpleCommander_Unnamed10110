@@ -438,13 +438,11 @@ fn update_preview_from_selection(app: &mut ScApp, pane: usize) {
         return;
     }
     let tab = app.panes[pane].tab();
-    let path = tab
-        .selection
-        .iter()
-        .next()
-        .and_then(|&i| tab.snapshot.entries.get(i as usize))
-        .map(|e| tab.path.join(&e.name));
-    app.request_preview(path);
+    let file = tab.selection.iter().find_map(|&i| {
+        let e = tab.snapshot.entries.get(i as usize)?;
+        (!e.is_dir()).then(|| tab.path.join(&e.name))
+    });
+    app.request_preview(file);
 }
 
 // ---------------------------------------------------------------- top bar
@@ -1007,6 +1005,7 @@ fn paint_file_drag_badge(app: &ScApp, ctx: &egui::Context) {
     if !egui::DragAndDrop::has_payload_of_type::<FileDrag>(ctx) {
         return;
     }
+    ctx.request_repaint();
     let Some(pos) = ctx.pointer_hover_pos().or_else(|| ctx.pointer_interact_pos()) else {
         return;
     };
@@ -1014,7 +1013,6 @@ fn paint_file_drag_badge(app: &ScApp, ctx: &egui::Context) {
     let count = egui::DragAndDrop::payload::<FileDrag>(ctx)
         .map(|d| d.paths.len())
         .unwrap_or(1);
-    ctx.request_repaint();
 
     let noun = if count == 1 {
         "item".to_string()
@@ -1110,6 +1108,7 @@ fn tab_bar(app: &mut ScApp, ui: &mut Ui, pane: usize) {
                 }
                 let stroke_c = if is_active_tab { accent } else { separator };
 
+                let mut close_rect: Option<Rect> = None;
                 let inner = egui::Frame::new()
                     .inner_margin(egui::Margin::symmetric(6, 3))
                     .corner_radius(4)
@@ -1118,6 +1117,7 @@ fn tab_bar(app: &mut ScApp, ui: &mut Ui, pane: usize) {
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 4.0;
+                            ui.set_min_height(20.0);
                             if renaming {
                                 if let Some(r) = &mut app.tab_rename {
                                     let mut output = TextEdit::singleline(&mut r.buffer)
@@ -1158,82 +1158,90 @@ fn tab_bar(app: &mut ScApp, ui: &mut Ui, pane: usize) {
                                 } else {
                                     RichText::new(&title)
                                 };
-                                let resp = ui
-                                    .add(
-                                        egui::Button::new(text)
-                                            .selected(is_active_tab)
-                                            .frame(false)
-                                            .sense(Sense::click_and_drag()),
-                                    )
-                                    .on_hover_cursor(CursorIcon::Default);
-                                resp.dnd_set_drag_payload(TabDrag { uid });
-                                if !egui::DragAndDrop::has_payload_of_type::<FileDrag>(ui.ctx()) {
-                                    if resp.dnd_hover_payload::<TabDrag>().is_some() {
-                                        let r = resp.rect;
-                                        ui.painter().vline(
-                                            r.left(),
-                                            r.y_range(),
-                                            egui::Stroke::new(2.0, accent),
-                                        );
-                                    }
-                                    if let Some(d) = dnd_release::<TabDrag>(&resp) {
-                                        drop_at = Some(((*d).clone(), i));
-                                    }
-                                }
-                                if resp.clicked() {
-                                    switch_to = Some(i);
-                                }
-                                if resp.middle_clicked() {
-                                    close = Some(i);
-                                }
-                                resp.context_menu(|ui| {
-                                    if ui.button("Rename tab…").clicked() {
-                                        start_rename = Some(i);
-                                        ui.close();
-                                    }
-                                    if ui.button(if locked { "Unlock tab" } else { "Lock tab" }).clicked() {
-                                        toggle_lock = Some(i);
-                                        ui.close();
-                                    }
-                                    if ui.button("Duplicate tab").clicked() {
-                                        duplicate = Some(i);
-                                        ui.close();
-                                    }
-                                    ui.menu_button("Color", |ui| {
-                                        for (name, c) in LABEL_COLORS {
-                                            if name == "None" {
-                                                if ui.button("None").clicked() {
-                                                    set_color = Some((i, None));
-                                                    ui.close();
-                                                }
-                                                continue;
-                                            }
-                                            let label = RichText::new(format!("● {name}")).color(c);
-                                            if ui.button(label).clicked() {
-                                                set_color = Some((i, Some(crate::theme::hex_of(c))));
-                                                ui.close();
-                                            }
-                                        }
-                                    });
-                                    if can_close_any && !locked && ui.button("Close tab").clicked() {
-                                        close = Some(i);
-                                        ui.close();
-                                    }
-                                });
+                                ui.add(egui::Label::new(text).selectable(false));
                             }
                             if can_close_any && !locked {
-                                if ui
+                                let close_btn = ui
                                     .add(egui::Button::new("×").small().frame(false))
                                     .on_hover_cursor(CursorIcon::Default)
-                                    .on_hover_text("Close tab")
-                                    .clicked()
-                                {
+                                    .on_hover_text("Close tab");
+                                close_rect = Some(close_btn.rect);
+                                if close_btn.clicked() {
                                     close = Some(i);
                                 }
                             }
                         });
                     });
                 let r = inner.response.rect;
+                if !renaming {
+                    let tab_resp = ui
+                        .interact(
+                            r,
+                            ui.id().with(("tab", pane, uid)),
+                            Sense::click_and_drag(),
+                        )
+                        .on_hover_cursor(CursorIcon::Default);
+                    let on_close = close_rect.is_some_and(|cr| ui.rect_contains_pointer(cr));
+                    if on_close {
+                        if tab_resp.clicked() {
+                            close = Some(i);
+                        }
+                    } else {
+                        tab_resp.dnd_set_drag_payload(TabDrag { uid });
+                        if !egui::DragAndDrop::has_payload_of_type::<FileDrag>(ui.ctx()) {
+                            if tab_resp.dnd_hover_payload::<TabDrag>().is_some() {
+                                ui.painter().vline(
+                                    r.left(),
+                                    r.y_range(),
+                                    egui::Stroke::new(2.0, accent),
+                                );
+                            }
+                            if let Some(d) = dnd_release::<TabDrag>(&tab_resp) {
+                                drop_at = Some(((*d).clone(), i));
+                            }
+                        }
+                        if tab_resp.clicked() {
+                            switch_to = Some(i);
+                        }
+                        if tab_resp.middle_clicked() {
+                            close = Some(i);
+                        }
+                        tab_resp.context_menu(|ui| {
+                            if ui.button("Rename tab…").clicked() {
+                                start_rename = Some(i);
+                                ui.close();
+                            }
+                            if ui.button(if locked { "Unlock tab" } else { "Lock tab" }).clicked() {
+                                toggle_lock = Some(i);
+                                ui.close();
+                            }
+                            if ui.button("Duplicate tab").clicked() {
+                                duplicate = Some(i);
+                                ui.close();
+                            }
+                            ui.menu_button("Color", |ui| {
+                                for (name, c) in LABEL_COLORS {
+                                    if name == "None" {
+                                        if ui.button("None").clicked() {
+                                            set_color = Some((i, None));
+                                            ui.close();
+                                        }
+                                        continue;
+                                    }
+                                    let label = RichText::new(format!("● {name}")).color(c);
+                                    if ui.button(label).clicked() {
+                                        set_color = Some((i, Some(crate::theme::hex_of(c))));
+                                        ui.close();
+                                    }
+                                }
+                            });
+                            if can_close_any && !locked && ui.button("Close tab").clicked() {
+                                close = Some(i);
+                                ui.close();
+                            }
+                        });
+                    }
+                }
                 if let Some(drag) = egui::DragAndDrop::payload::<FileDrag>(ui.ctx()) {
                     if ui.rect_contains_pointer(r) {
                         let dest = &app.panes[pane].tabs[i].path;
@@ -1428,7 +1436,7 @@ fn address_bar(app: &mut ScApp, ui: &mut Ui, pane: usize) {
                             nav = Some(sc_shell::recycle::recycle_root());
                             ui.close();
                         }
-                        for (name, path) in sc_shell::volumes::wsl_distros() {
+                        for (name, path) in app.wsl_distros.clone() {
                             if ui.button(format!("WSL: {name}")).clicked() {
                                 nav = Some(path);
                                 ui.close();
@@ -2127,16 +2135,21 @@ fn file_table(app: &mut ScApp, ui: &mut Ui, pane: usize) {
                         }
                     }
                     if resp.drag_started() && app.marquee.is_none() {
-                        if selected {
-                            let paths: Vec<PathBuf> = selection
+                        let paths: Vec<PathBuf> = if selected {
+                            selection
                                 .iter()
                                 .filter_map(|&idx| {
                                     entries.get(idx as usize).map(|e| dir_path.join(&e.name))
                                 })
-                                .collect();
+                                .collect()
+                        } else {
+                            vec![dir_path.join(&entry.name)]
+                        };
+                        if !paths.is_empty() {
                             resp.dnd_set_drag_payload(FileDrag { paths });
-                        } else if app.rename.is_none() {
-                            action.start_marquee = true;
+                            if !selected {
+                                action.select_single = Some((ei, vpos));
+                            }
                         }
                     } else if double_clicked {
                         action.open = Some(ei);
@@ -2754,9 +2767,24 @@ fn format_time(filetime: u64) -> String {
     if filetime == 0 {
         return String::new();
     }
-    let local = sc_shell::enumerate::filetime_utc_to_local(filetime);
-    let unix = sc_core::entry::filetime_to_unix_secs(local);
-    format_unix_time(unix)
+    thread_local! {
+        static CACHE: std::cell::RefCell<std::collections::HashMap<u64, String>> =
+            std::cell::RefCell::new(std::collections::HashMap::new());
+    }
+    CACHE.with(|c| {
+        let mut cache = c.borrow_mut();
+        if let Some(s) = cache.get(&filetime) {
+            return s.clone();
+        }
+        let local = sc_shell::enumerate::filetime_utc_to_local(filetime);
+        let unix = sc_core::entry::filetime_to_unix_secs(local);
+        let s = format_unix_time(unix);
+        if cache.len() > 8192 {
+            cache.clear();
+        }
+        cache.insert(filetime, s.clone());
+        s
+    })
 }
 
 /// Minimal date formatting without a chrono dependency.
@@ -2935,23 +2963,15 @@ fn ops_panel(app: &mut ScApp, ui: &mut Ui) {
 }
 
 fn status_bar(app: &mut ScApp, ui: &mut Ui) {
-    if app.volumes_refreshed.elapsed().as_secs() > 15 {
-        app.volumes = sc_shell::volumes::list_volumes();
-        app.volumes_refreshed = std::time::Instant::now();
-    }
+    app.maybe_refresh_places();
     egui::Panel::bottom("status").show(ui, |ui| {
         ui.horizontal(|ui| {
             let path = app.active_tab().path.clone();
-            let (dirs, files, file_bytes, view_len, has_filter, loading, picked) = {
+            let (dirs, files, file_bytes, view_len, has_filter, loading, sel, first_name, entries, selection) = {
                 let tab = app.active_tab();
-                let picked: Vec<(bool, u64, String)> = tab
-                    .selection
-                    .iter()
-                    .filter_map(|&i| {
-                        let e = tab.snapshot.entries.get(i as usize)?;
-                        Some((e.is_dir(), e.size, e.name.clone()))
-                    })
-                    .collect();
+                let first_name = tab.selection.iter().next().and_then(|&i| {
+                    tab.snapshot.entries.get(i as usize).map(|e| e.name.clone())
+                });
                 (
                     tab.snapshot.dir_count,
                     tab.snapshot.file_count,
@@ -2959,20 +2979,20 @@ fn status_bar(app: &mut ScApp, ui: &mut Ui) {
                     tab.view.len(),
                     !tab.filter.is_empty(),
                     tab.loading,
-                    picked,
+                    tab.selection.len(),
+                    first_name,
+                    tab.snapshot.entries.clone(),
+                    tab.selection.clone(),
                 )
             };
-            let sel = picked.len();
-            let sel_bytes: u64 = picked
+            let sel_bytes: u64 = selection
                 .iter()
-                .map(|(is_dir, size, name)| {
-                    if *is_dir {
-                        app.folder_sizes
-                            .get(&path.join(name))
-                            .copied()
-                            .unwrap_or(0)
+                .filter_map(|&i| {
+                    let e = entries.get(i as usize)?;
+                    if e.is_dir() {
+                        app.folder_sizes.get(&path.join(&e.name)).copied()
                     } else {
-                        *size
+                        Some(e.size)
                     }
                 })
                 .sum();
@@ -2986,7 +3006,7 @@ fn status_bar(app: &mut ScApp, ui: &mut Ui) {
                 left.push_str("  ·  loading…");
             }
             if sc_shell::recycle::is_recycle_path(&path) {
-                if let Some(name) = picked.first().map(|(_, _, n)| n.clone()) {
+                if let Some(name) = first_name {
                     if let Some(item) = app.recycle_meta.get(&name) {
                         if let Some(orig) = &item.original_path {
                             left.push_str(&format!("  ·  from {}", orig.display()));
@@ -3309,40 +3329,84 @@ fn toasts(app: &mut ScApp, ctx: &egui::Context) {
 }
 
 fn pointer_outside_window(hwnd: Option<isize>) -> bool {
-    let Some(raw) = hwnd.filter(|h| *h != 0) else {
-        return false;
-    };
-    unsafe {
-        use windows::Win32::Foundation::{HWND, POINT, RECT};
-        use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, GetWindowRect};
-        let mut pt = POINT::default();
-        if GetCursorPos(&mut pt).is_err() {
-            return false;
-        }
-        let mut rc = RECT::default();
-        let h = HWND(raw as *mut core::ffi::c_void);
-        if GetWindowRect(h, &mut rc).is_err() {
-            return false;
-        }
-        pt.x < rc.left || pt.x >= rc.right || pt.y < rc.top || pt.y >= rc.bottom
+    sc_shell::drag::cursor_outside_window(hwnd)
+}
+
+/// If Windows already released the left button but egui still thinks it is
+/// down (typical after OLE `DoDragDrop` or a missed mouse-up), inject a
+/// release so clicks and drags work again.
+pub(crate) fn recover_stuck_pointer(
+    app: &mut ScApp,
+    ctx: &egui::Context,
+    raw: &mut egui::RawInput,
+) {
+    let os_down = async_key_down(0x01); // VK_LBUTTON
+    if os_down {
+        return;
     }
+
+    app.marquee = None;
+    app.drag_active = false;
+
+    if !ctx.input(|i| i.pointer.primary_down()) {
+        return;
+    }
+
+    egui::DragAndDrop::clear_payload(ctx);
+    raw.events.retain(|e| {
+        !matches!(
+            e,
+            egui::Event::PointerButton {
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                ..
+            }
+        )
+    });
+    let pos = ctx.pointer_latest_pos().unwrap_or(egui::pos2(0.0, 0.0));
+    let modifiers = ctx.input(|i| i.modifiers);
+    raw.events.push(egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers,
+    });
 }
 
 fn handle_file_drops(app: &mut ScApp, ctx: &egui::Context) {
-    // Reset OLE drag guard once the button is released.
-    if !ctx.input(|i| i.pointer.primary_down()) {
+    let dragging = egui::DragAndDrop::has_payload_of_type::<FileDrag>(ctx);
+    let os_down = async_key_down(0x01);
+    if !os_down {
         app.drag_active = false;
+        sc_shell::drag::release_mouse();
     }
 
-    // Dragging files out of the window → native OLE drop (Explorer, etc.).
-    if !app.drag_active
-        && egui::DragAndDrop::has_payload_of_type::<FileDrag>(ctx)
-        && pointer_outside_window(app.preview.parent_hwnd)
-    {
-        if let Some(drag) = egui::DragAndDrop::take_payload::<FileDrag>(ctx) {
-            app.drag_active = true;
-            if sc_shell::drag::start_drag(&drag.paths) == Some(true) {
-                app.request_listing(app.active_pane, false);
+    if dragging && os_down {
+        ctx.request_repaint();
+        ctx.request_repaint_after(std::time::Duration::from_millis(16));
+        sc_shell::drag::capture_mouse(app.preview.parent_hwnd);
+        let (pointer_gone, pos_outside) = ctx.input(|i| {
+            let gone = i.pointer.latest_pos().is_none();
+            let outside_ui = i
+                .pointer
+                .latest_pos()
+                .is_some_and(|p| !i.viewport_rect().contains(p));
+            (gone, outside_ui)
+        });
+        let outside = pointer_outside_window(app.preview.parent_hwnd)
+            || pointer_gone
+            || pos_outside;
+        if !app.drag_active && outside {
+            if let Some(drag) = egui::DragAndDrop::take_payload::<FileDrag>(ctx) {
+                app.drag_active = true;
+                sc_shell::drag::release_mouse();
+                let moved = sc_shell::drag::start_drag(&drag.paths) == Some(true);
+                app.drag_active = false;
+                app.marquee = None;
+                egui::DragAndDrop::clear_payload(ctx);
+                if moved {
+                    app.request_listing(app.active_pane, false);
+                }
             }
         }
     }

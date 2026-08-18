@@ -52,6 +52,8 @@ pub enum Job {
     Checksum { path: PathBuf },
     /// Subdirectory names only (for the tree sidebar).
     ListDirs { path: PathBuf },
+    /// Drives, WSL, network shares, known folders — never on the UI thread.
+    RefreshPlaces,
     CompareFolders {
         query_id: u64,
         left: PathBuf,
@@ -93,6 +95,12 @@ pub enum UiMsg {
     Checksum { path: PathBuf, value: Option<String> },
     DirChanged { pane: usize, tab_uid: u64 },
     DirsListed { path: PathBuf, dirs: Vec<String> },
+    Places {
+        volumes: Vec<sc_shell::volumes::VolumeInfo>,
+        wsl: Vec<(String, PathBuf)>,
+        network: Vec<(String, PathBuf)>,
+        known: Vec<(String, PathBuf)>,
+    },
     RecycleMeta { items: Vec<sc_shell::recycle::RecycleItem> },
     CompareResult {
         query_id: u64,
@@ -309,6 +317,14 @@ fn run_job(
         Job::Checksum { path } => {
             let value = sha256_file(&path);
             send(UiMsg::Checksum { path, value });
+        }
+        Job::RefreshPlaces => {
+            send(UiMsg::Places {
+                volumes: sc_shell::volumes::list_volumes(),
+                wsl: sc_shell::volumes::wsl_distros(),
+                network: sc_shell::volumes::network_places(),
+                known: sc_shell::volumes::known_folders(),
+            });
         }
         Job::ListDirs { path } => {
             let mut dirs: Vec<String> = Vec::new();

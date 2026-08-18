@@ -59,10 +59,8 @@ A fast, XYplorer-class dual-pane file explorer for Windows, written in Rust.
 
 ```powershell
 ./package-portable.ps1  # dist/SimpleCommander-portable.zip (exe + plugins + docs)
-
-# MSI installer (requires the WiX v3 toolset):
-cargo install cargo-wix
-cargo wix -p sc-app --include wix/main.wxs
+./build-msi.ps1         # WiX MSI → target/wix/SimpleCommander-<version>.msi
+./build-msi.ps1 -SkipBuild  # pack an already-built release exe
 ```
 
 Install via **Tools → Plugin manager → Install plugin**, then grant the

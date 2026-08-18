@@ -18,6 +18,10 @@ mod vfs;
 use app::ScApp;
 
 impl eframe::App for ScApp {
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        crate::ui::recover_stuck_pointer(self, ctx, raw_input);
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.preview.parent_hwnd = crate::preview::capture_parent(frame);
         let ctx = ui.ctx().clone();
@@ -54,6 +58,7 @@ fn main() -> eframe::Result {
     use eframe::egui_wgpu::{wgpu, WgpuSetup};
     set_app_user_model_id();
     let launched = std::time::Instant::now();
+    sc_shell::drag::ensure_ole();
     // Restrict to DX12 with a GL fallback: enumerating Vulkan crashes inside
     // some Windows Vulkan drivers before we get any chance to recover.
     // WGPU_BACKEND still overrides for debugging.
@@ -62,9 +67,9 @@ fn main() -> eframe::Result {
         setup.instance_descriptor.backends = wgpu::Backends::from_env()
             .unwrap_or(wgpu::Backends::DX12 | wgpu::Backends::GL);
     }
-    // Frame latency 1 causes visible flicker on some DX12 drivers whenever the
-    // cursor triggers repaints; latency 2 with vsync is stable.
-    wgpu_options.surface = eframe::egui_wgpu::SurfaceConfig::HIGH_THROUGHPUT;
+    // One queued frame: clicks (select, tabs) show up on the next vsync.
+    // Resize still bumps latency in egui-wgpu, which is where flicker showed up.
+    wgpu_options.surface = eframe::egui_wgpu::SurfaceConfig::LOW_LATENCY;
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("SimpleCommander")

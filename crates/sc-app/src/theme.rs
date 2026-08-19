@@ -31,15 +31,15 @@ pub const AMOLED: Theme = Theme {
     bg: Color32::BLACK,
     panel: Color32::BLACK,
     header: Color32::BLACK,
-    separator: Color32::from_rgb(0x1a, 0x1a, 0x1a),
+    separator: Color32::from_rgb(0x1f, 0x33, 0x3d),
     text: Color32::from_rgb(0xd4, 0xd4, 0xd4),
     text_weak: Color32::from_rgb(0x8a, 0x8a, 0x8a),
     text_strong: Color32::from_rgb(0xff, 0xff, 0xff),
     accent: Color32::from_rgb(0x2f, 0xb8, 0xff),
     accent_dim: Color32::from_rgb(0x14, 0x53, 0x73),
     selection_bg: Color32::from_rgb(0x0a, 0x2b, 0x3f),
-    hover_bg: Color32::from_rgb(0x0e, 0x0e, 0x0e),
-    stripe: Color32::from_rgb(0x05, 0x05, 0x05),
+    hover_bg: Color32::from_rgb(0x0a, 0x1e, 0x29),
+    stripe: Color32::from_rgb(0x06, 0x0e, 0x13),
     folder: Color32::from_rgb(0xff, 0xd8, 0x66),
     error: Color32::from_rgb(0xff, 0x5c, 0x5c),
     warn: Color32::from_rgb(0xff, 0xb8, 0x4d),
@@ -52,15 +52,15 @@ pub const AMOLED_AMBER: Theme = Theme {
     bg: Color32::BLACK,
     panel: Color32::BLACK,
     header: Color32::BLACK,
-    separator: Color32::from_rgb(0x22, 0x18, 0x0a),
+    separator: Color32::from_rgb(0x33, 0x26, 0x0f),
     text: Color32::from_rgb(0xe8, 0xdc, 0xc8),
     text_weak: Color32::from_rgb(0x9a, 0x86, 0x68),
     text_strong: Color32::from_rgb(0xff, 0xf4, 0xe0),
     accent: Color32::from_rgb(0xff, 0xb0, 0x20),
     accent_dim: Color32::from_rgb(0x6a, 0x42, 0x08),
     selection_bg: Color32::from_rgb(0x2a, 0x18, 0x00),
-    hover_bg: Color32::from_rgb(0x12, 0x0c, 0x06),
-    stripe: Color32::from_rgb(0x0a, 0x07, 0x03),
+    hover_bg: Color32::from_rgb(0x23, 0x18, 0x04),
+    stripe: Color32::from_rgb(0x12, 0x0c, 0x03),
     folder: Color32::from_rgb(0xff, 0xd8, 0x66),
     error: Color32::from_rgb(0xff, 0x6b, 0x5c),
     warn: Color32::from_rgb(0xff, 0xb8, 0x4d),
@@ -73,15 +73,15 @@ pub const AMOLED_VIOLET: Theme = Theme {
     bg: Color32::BLACK,
     panel: Color32::BLACK,
     header: Color32::BLACK,
-    separator: Color32::from_rgb(0x1c, 0x12, 0x28),
+    separator: Color32::from_rgb(0x2a, 0x1f, 0x3d),
     text: Color32::from_rgb(0xdc, 0xd4, 0xea),
     text_weak: Color32::from_rgb(0x8a, 0x7c, 0xa0),
     text_strong: Color32::from_rgb(0xf6, 0xf0, 0xff),
     accent: Color32::from_rgb(0xc4, 0x84, 0xfc),
     accent_dim: Color32::from_rgb(0x4c, 0x1d, 0x95),
     selection_bg: Color32::from_rgb(0x1e, 0x0a, 0x3a),
-    hover_bg: Color32::from_rgb(0x10, 0x08, 0x18),
-    stripe: Color32::from_rgb(0x08, 0x04, 0x0c),
+    hover_bg: Color32::from_rgb(0x1b, 0x12, 0x23),
+    stripe: Color32::from_rgb(0x0d, 0x09, 0x11),
     folder: Color32::from_rgb(0xff, 0xd8, 0x66),
     error: Color32::from_rgb(0xff, 0x6b, 0x8a),
     warn: Color32::from_rgb(0xff, 0xb8, 0x4d),
@@ -250,7 +250,8 @@ fn scale_rgb(c: Color32, factor: f32) -> Color32 {
     )
 }
 
-fn mix_rgb(a: Color32, b: Color32, t: f32) -> Color32 {
+/// Blend `a` toward `b` by `t` (0 = all `a`, 1 = all `b`).
+pub fn mix_rgb(a: Color32, b: Color32, t: f32) -> Color32 {
     let t = t.clamp(0.0, 1.0);
     Color32::from_rgb(
         (a.r() as f32 + (b.r() as f32 - a.r() as f32) * t).round() as u8,
@@ -269,8 +270,11 @@ pub fn apply_accent_override(t: &mut Theme, hex: &str) {
         t.accent_dim = scale_rgb(c, 0.38);
         t.selection_bg = scale_rgb(c, 0.20);
         if t.bg == Color32::BLACK {
-            t.hover_bg = scale_rgb(c, 0.07);
-            t.stripe = scale_rgb(c, 0.04);
+            // Scaling the accent toward black yields a tinted dark surface. The
+            // old factors (0.07 / 0.04) landed under about 20/255 on the
+            // brightest channel, which is not perceptible on an OLED panel.
+            t.hover_bg = scale_rgb(c, 0.14);
+            t.stripe = scale_rgb(c, 0.07);
             t.separator = mix_rgb(Color32::from_rgb(0x1a, 0x1a, 0x1a), c, 0.22);
         } else {
             t.hover_bg = mix_rgb(t.hover_bg, c, 0.14);
@@ -348,7 +352,10 @@ pub fn apply(ctx: &egui::Context, t: &Theme) {
     v.warn_fg_color = t.warn;
     v.error_fg_color = t.error;
 
-    let corner = CornerRadius::same(3);
+    // One radius system: 4 for controls and rows, 8 for floating surfaces.
+    let corner = CornerRadius::same(4);
+    v.window_corner_radius = CornerRadius::same(8);
+    v.menu_corner_radius = CornerRadius::same(8);
     for (wv, bg, stroke_c) in [
         (&mut v.widgets.noninteractive, t.panel, t.separator),
         (&mut v.widgets.inactive, t.hover_bg, t.separator),
@@ -374,7 +381,10 @@ pub fn apply(ctx: &egui::Context, t: &Theme) {
     });
     ctx.all_styles_mut(|style| {
         style.visuals = v.clone();
-        style.animation_time = 0.0;
+        // Short enough to stay snappy, long enough that hover and expand read as
+        // movement rather than teleporting. Zero here made the whole UI feel
+        // brittle; the file table sets its own spacing/feel separately.
+        style.animation_time = 0.08;
         style.interaction.selectable_labels = false;
         style.spacing.item_spacing = egui::vec2(6.0, 4.0);
         style.spacing.button_padding = egui::vec2(8.0, 3.0);

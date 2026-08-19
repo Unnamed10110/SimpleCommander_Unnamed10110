@@ -17,6 +17,7 @@ pub enum Glyph {
     Terminal,
     Copy,
     Move,
+    Close,
 }
 
 pub fn button(ui: &mut Ui, glyph: Glyph, selected: bool, tip: &str) -> Response {
@@ -184,6 +185,11 @@ pub fn paint_glyph(p: &egui::Painter, r: Rect, glyph: Glyph, color: Color32) {
                 ],
                 Stroke::new(1.6, color),
             ));
+        }
+        Glyph::Close => {
+            let r = r.shrink(3.5);
+            p.line_segment([r.left_top(), r.right_bottom()], stroke);
+            p.line_segment([r.right_top(), r.left_bottom()], stroke);
         }
     }
 }

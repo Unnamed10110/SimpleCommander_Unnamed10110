@@ -10,7 +10,7 @@ use crate::tags::TagStore;
 use crate::theme::{self, Theme};
 use egui::TextureHandle;
 use sc_core::snapshot::DirSnapshot;
-use sc_core::sort::{dirs_first_indices, SortKey, SortSpec};
+use sc_core::sort::{streaming_indices, SortKey, SortSpec};
 use sc_core::state::{PaneLayout, PaneState, Session, SessionPane, SessionTab, SplitDirection, TabState};
 use sc_ops::queue::{ConflictResolution, OpEngine, OpEvent, OpOrigin, Operation};
 use sc_ops::undo::UndoJournal;
@@ -241,14 +241,14 @@ pub struct ScApp {
     pub tree_pending: HashSet<PathBuf>,
     /// Screen rects of the panes from the last frame (for drop targeting).
     pub pane_rects: Vec<egui::Rect>,
-    /// Tab headers under a file drag: drop copies into that tab's folder.
-    pub drop_tab_hits: Vec<(egui::Rect, PathBuf)>,
-    /// Directory rows under a file drag: drop copies into that folder.
-    pub drop_dir_hits: Vec<(egui::Rect, PathBuf)>,
-    /// File-list bodies under a file drag: drop copies into the current folder.
-    pub drop_body_hits: Vec<(egui::Rect, PathBuf)>,
+    /// Destination under the pointer during a file drag, for the drag badge.
+    /// Display only — drop targeting itself goes through egui hit testing.
+    pub drop_hint: Option<crate::interact::DropHint>,
     /// Guard so only one OLE drag starts per gesture.
-    pub drag_active: bool,
+    pub ole_drag_active: bool,
+    /// Set when a modal OLE drag swallowed the mouse-up, so the next
+    /// `raw_input_hook` injects the release egui never saw.
+    pub pointer_reset: bool,
     /// Fraction of the dual split occupied by pane 0.
     pub split_ratio: f32,
     /// Width of the navigation sidebar in points.
@@ -267,53 +267,11 @@ pub struct ScApp {
     /// Scroll the file table to the cursor for this tab once.
     pub force_scroll_tab: Option<u64>,
     /// Rubber-band selection in a file list (drag on empty space or unselected rows).
-    pub marquee: Option<Marquee>,
+    pub marquee: Option<crate::interact::Marquee>,
     /// Mouse-down in the file list; used to tell click / marquee / file-drag apart.
-    pub list_press: Option<ListPress>,
-    /// Last file-list click, so double-click only opens the same item.
-    pub list_click: Option<ListClick>,
+    pub list_press: Option<crate::interact::ListPress>,
     /// Name prompt for New file / New folder.
     pub new_item: Option<NewItemPrompt>,
-}
-
-/// In-progress mouse region selection.
-#[derive(Clone)]
-pub struct Marquee {
-    pub pane: usize,
-    pub tab_uid: u64,
-    pub origin: egui::Pos2,
-    /// Row the drag started on. `None` = empty space (below/around the list).
-    pub origin_view: Option<usize>,
-    /// Offset from that row's top, so the rubber-band stays pinned to the row.
-    pub origin_y_in_row: f32,
-    pub row_height: f32,
-    /// Edge autoscroll accumulator (rows).
-    pub scroll_acc: f32,
-    /// Ctrl/Cmd held at drag start → union with the previous selection.
-    pub additive: bool,
-    pub keep: HashSet<u32>,
-}
-
-/// Primary-button press in a file list, until release or a drag is decided.
-#[derive(Clone)]
-pub struct ListPress {
-    pub pane: usize,
-    pub tab_uid: u64,
-    /// `None` when the press started on empty space below/around rows.
-    pub vpos: Option<usize>,
-    /// `None` when the press started on empty space below/around rows.
-    pub ei: Option<u32>,
-    pub was_selected: bool,
-    pub ctrl: bool,
-    pub shift: bool,
-}
-
-/// Previous click in a file list (Explorer-style double-click = same item).
-pub struct ListClick {
-    pub tab_uid: u64,
-    pub path: PathBuf,
-    pub name: String,
-    pub at: Instant,
 }
 
 impl ScApp {
@@ -493,10 +451,9 @@ impl ScApp {
             tree_open: HashSet::new(),
             tree_pending: HashSet::new(),
             pane_rects: Vec::new(),
-            drop_tab_hits: Vec::new(),
-            drop_dir_hits: Vec::new(),
-            drop_body_hits: Vec::new(),
-            drag_active: false,
+            drop_hint: None,
+            ole_drag_active: false,
+            pointer_reset: false,
             split_ratio: session.split_ratio.clamp(0.15, 0.85),
             sidebar_width: session.sidebar_width.clamp(140.0, 480.0),
             preview_width: session.preview_width.clamp(200.0, 800.0),
@@ -508,7 +465,6 @@ impl ScApp {
             force_scroll_tab: None,
             marquee: None,
             list_press: None,
-            list_click: None,
             new_item: None,
         };
         app.tree_open = session.tree_expanded.iter().cloned().collect();
@@ -595,10 +551,18 @@ impl ScApp {
         }
     }
 
-    pub fn navigate(&mut self, pane: usize, to: PathBuf) {
-        self.list_click = None;
+    /// Forget any in-progress mouse gesture in a file list.
+    ///
+    /// Called whenever the ground moves under a gesture (navigation, listing
+    /// reload) so a press or rubber-band cannot resolve against rows that no
+    /// longer exist.
+    pub fn end_list_gesture(&mut self) {
         self.list_press = None;
         self.marquee = None;
+    }
+
+    pub fn navigate(&mut self, pane: usize, to: PathBuf) {
+        self.end_list_gesture();
         self.remember_unc(&to);
         let tab = self.panes[pane].tab_mut();
         if tab.locked && tab.path != to {
@@ -618,9 +582,7 @@ impl ScApp {
     }
 
     pub fn history_forward(&mut self, pane: usize) {
-        self.list_click = None;
-        self.list_press = None;
-        self.marquee = None;
+        self.end_list_gesture();
         if self.panes[pane].tab_mut().go_forward() {
             self.request_listing(pane, false);
         }
@@ -639,9 +601,7 @@ impl ScApp {
             .map(|n| n.to_string_lossy().into_owned());
         let uid = tab.uid;
         if nav(self.panes[pane].tab_mut()) {
-            self.list_click = None;
-            self.list_press = None;
-            self.marquee = None;
+            self.end_list_gesture();
             if let Some(name) = name {
                 self.pending_select = Some((uid, vec![name]));
             }
@@ -1026,7 +986,10 @@ impl ScApp {
                         file_bytes: 0,
                     };
                     tab.snapshot.recompute_counts();
-                    tab.view = Arc::new(dirs_first_indices(&tab.snapshot.entries));
+                    tab.view = Arc::new(streaming_indices(
+                        &tab.snapshot.entries,
+                        tab.sort.ascending,
+                    ));
                     if done {
                         tab.loading = false;
                         tab.pending = Vec::new();
@@ -1375,6 +1338,22 @@ impl ScApp {
 
     /// Copy or move `sources` into `dest`. Empty after filtering (same folder,
     /// dropping a folder into itself) is a no-op.
+    /// Apply an in-app drag: copy or move `sources` into `dest`, then refresh
+    /// the pane the drag came from if files left it.
+    pub fn drop_files_into_from(
+        &mut self,
+        sources: Vec<PathBuf>,
+        dest: PathBuf,
+        effect: crate::interact::DropEffect,
+        from_pane: usize,
+    ) {
+        let is_move = effect.is_move();
+        self.drop_files_into(sources, dest, is_move);
+        if is_move && from_pane < self.panes.len() {
+            self.request_listing(from_pane, false);
+        }
+    }
+
     pub fn drop_files_into(&mut self, sources: Vec<PathBuf>, dest: PathBuf, is_move: bool) {
         if crate::vfs::split_zip_path(&dest).is_some() {
             self.toast("Cannot drop into a zip archive".into(), true);
@@ -1836,7 +1815,7 @@ impl ScApp {
         if tab.sort.key == key {
             tab.sort.ascending = !tab.sort.ascending;
         } else {
-            tab.sort = SortSpec { key, ascending: true, dirs_first: tab.sort.dirs_first };
+            tab.sort = SortSpec { key, ascending: true };
         }
         self.rebuild_view(pane);
     }

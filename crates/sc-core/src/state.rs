@@ -203,6 +203,26 @@ impl TabState {
         self.anchor = Some(pos);
     }
 
+    /// Select the inclusive view range `a..=b`, optionally unioned with a
+    /// previously captured set (Ctrl + rubber-band). Anchor ends at `a`,
+    /// cursor at `b`, so a following Shift+click extends from the band's start.
+    pub fn select_view_range(&mut self, a: usize, b: usize, keep: Option<&HashSet<u32>>) {
+        let n = self.view.len();
+        if n == 0 {
+            return;
+        }
+        let (a, b) = (a.min(n - 1), b.min(n - 1));
+        self.selection.clear();
+        if let Some(keep) = keep {
+            self.selection.extend(keep.iter().copied());
+        }
+        if let Some(slice) = self.view.get(a.min(b)..=a.max(b)) {
+            self.selection.extend(slice.iter().copied());
+        }
+        self.anchor = Some(a);
+        self.cursor = Some(b);
+    }
+
     pub fn cursor_path(&self) -> Option<PathBuf> {
         let pos = self.cursor?;
         let ei = *self.view.get(pos)?;
@@ -404,6 +424,46 @@ mod tests {
         assert_eq!(t.anchor, Some(1));
         assert_eq!(t.cursor, Some(0));
         assert_eq!(t.selection, HashSet::from([0, 1]));
+    }
+
+    #[test]
+    fn select_view_range_covers_the_span_in_either_direction() {
+        let mut tab = tab_with_view(5);
+        tab.select_view_range(1, 3, None);
+        assert_eq!(tab.selection, [1, 2, 3].into_iter().collect());
+        assert_eq!(tab.anchor, Some(1));
+        assert_eq!(tab.cursor, Some(3));
+
+        // Dragging upward selects the same rows but flips anchor/cursor, so a
+        // following Shift+click extends from where the band started.
+        tab.select_view_range(3, 1, None);
+        assert_eq!(tab.selection, [1, 2, 3].into_iter().collect());
+        assert_eq!(tab.anchor, Some(3));
+        assert_eq!(tab.cursor, Some(1));
+    }
+
+    #[test]
+    fn select_view_range_unions_with_kept_selection() {
+        let mut tab = tab_with_view(5);
+        let keep: HashSet<u32> = [4].into_iter().collect();
+        tab.select_view_range(0, 1, Some(&keep));
+        assert_eq!(tab.selection, [0, 1, 4].into_iter().collect());
+    }
+
+    #[test]
+    fn select_view_range_clamps_past_the_end() {
+        let mut tab = tab_with_view(3);
+        tab.select_view_range(0, 99, None);
+        assert_eq!(tab.selection, [0, 1, 2].into_iter().collect());
+        assert_eq!(tab.cursor, Some(2));
+    }
+
+    #[test]
+    fn select_view_range_on_empty_view_is_a_no_op() {
+        let mut tab = TabState::new(PathBuf::from("C:\\a"));
+        tab.select_view_range(0, 5, None);
+        assert!(tab.selection.is_empty());
+        assert_eq!(tab.cursor, None);
     }
 
     #[test]

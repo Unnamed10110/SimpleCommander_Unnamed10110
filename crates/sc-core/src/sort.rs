@@ -14,12 +14,11 @@ pub enum SortKey {
 pub struct SortSpec {
     pub key: SortKey,
     pub ascending: bool,
-    pub dirs_first: bool,
 }
 
 impl Default for SortSpec {
     fn default() -> Self {
-        Self { key: SortKey::Name, ascending: true, dirs_first: true }
+        Self { key: SortKey::Name, ascending: true }
     }
 }
 
@@ -99,28 +98,43 @@ pub fn dirs_first_indices(entries: &[FsEntry]) -> Vec<u32> {
     dirs
 }
 
-/// Compare two entries under a sort spec.
-/// Directories always sort before files, regardless of column or direction.
-pub fn entry_cmp(a: &FsEntry, b: &FsEntry, spec: SortSpec) -> Ordering {
-    match (a.is_dir(), b.is_dir()) {
-        (true, false) => return Ordering::Less,
-        (false, true) => return Ordering::Greater,
-        _ => {}
+/// Provisional ordering for a listing that is still streaming in, before the
+/// real sort runs on a worker. Groups folders on the same side they will end up
+/// on, so the list does not visibly jump when the sort lands.
+pub fn streaming_indices(entries: &[FsEntry], ascending: bool) -> Vec<u32> {
+    let mut idx = dirs_first_indices(entries);
+    if !ascending {
+        idx.reverse();
     }
-    let ord = match spec.key {
-        SortKey::Name => natural_cmp(&a.name, &b.name),
-        SortKey::Size => a.size.cmp(&b.size).then_with(|| natural_cmp(&a.name, &b.name)),
-        SortKey::Type => cmp_ignore_ascii(a.ext(), b.ext())
-            .then_with(|| natural_cmp(&a.name, &b.name)),
-        SortKey::Modified => a
-            .modified
-            .cmp(&b.modified)
-            .then_with(|| natural_cmp(&a.name, &b.name)),
-        SortKey::Created => a
-            .created
-            .cmp(&b.created)
-            .then_with(|| natural_cmp(&a.name, &b.name)),
-    };
+    idx
+}
+
+/// Compare two entries under a sort spec.
+///
+/// Folders always stay in one block, never interleaved with files. The block
+/// itself takes part in the reversal, so ascending puts folders at the top and
+/// descending puts them at the bottom — the same as Windows Explorer.
+pub fn entry_cmp(a: &FsEntry, b: &FsEntry, spec: SortSpec) -> Ordering {
+    // `true > false`, so comparing b against a orders directories first.
+    let ord = b
+        .is_dir()
+        .cmp(&a.is_dir())
+        .then_with(|| match spec.key {
+            SortKey::Name => natural_cmp(&a.name, &b.name),
+            SortKey::Size => a.size.cmp(&b.size).then_with(|| natural_cmp(&a.name, &b.name)),
+            SortKey::Type => cmp_ignore_ascii(a.ext(), b.ext())
+                .then_with(|| natural_cmp(&a.name, &b.name)),
+            SortKey::Modified => a
+                .modified
+                .cmp(&b.modified)
+                .then_with(|| natural_cmp(&a.name, &b.name)),
+            SortKey::Created => a
+                .created
+                .cmp(&b.created)
+                .then_with(|| natural_cmp(&a.name, &b.name)),
+        });
+    // Reversing the combined ordering flips the groups too, which is what moves
+    // folders to the bottom rather than merely reversing them in place.
     if spec.ascending { ord } else { ord.reverse() }
 }
 
@@ -250,36 +264,86 @@ mod tests {
         }
     }
 
+    fn sorted(entries: &[FsEntry], spec: SortSpec) -> Vec<&str> {
+        build_view(entries, spec, "", true)
+            .iter()
+            .map(|&i| entries[i as usize].name.as_str())
+            .collect()
+    }
+
+    /// z.txt / b(dir) / a.txt / a(dir)
+    fn mixed() -> [FsEntry; 4] {
+        [
+            entry("z.txt", false),
+            entry("b", true),
+            entry("a.txt", false),
+            entry("a", true),
+        ]
+    }
+
     #[test]
-    fn folders_always_sort_first() {
+    fn ascending_puts_the_folder_block_on_top() {
+        let entries = mixed();
+        assert_eq!(
+            sorted(&entries, SortSpec { key: SortKey::Name, ascending: true }),
+            ["a", "b", "a.txt", "z.txt"]
+        );
+    }
+
+    #[test]
+    fn descending_moves_the_folder_block_to_the_bottom() {
+        let entries = mixed();
+        // Files first (reversed), then folders (reversed) — the whole list
+        // flips, so the group changes ends instead of just reordering in place.
+        assert_eq!(
+            sorted(&entries, SortSpec { key: SortKey::Name, ascending: false }),
+            ["z.txt", "a.txt", "b", "a"]
+        );
+    }
+
+    #[test]
+    fn folders_never_interleave_with_files() {
         let entries = [
             entry("z.txt", false),
             entry("b", true),
             entry("a.txt", false),
             entry("a", true),
+            entry("m.doc", false),
+            entry("m", true),
         ];
-        for spec in [
-            SortSpec { key: SortKey::Name, ascending: true, dirs_first: false },
-            SortSpec { key: SortKey::Name, ascending: false, dirs_first: false },
-            SortSpec { key: SortKey::Size, ascending: true, dirs_first: false },
-            SortSpec { key: SortKey::Type, ascending: true, dirs_first: false },
+        let is_dir = |n: &str| entries.iter().find(|e| e.name == n).unwrap().is_dir();
+        for key in [
+            SortKey::Name,
+            SortKey::Size,
+            SortKey::Type,
+            SortKey::Modified,
+            SortKey::Created,
         ] {
-            let view = build_view(&entries, spec, "", true);
-            let names: Vec<&str> = view
-                .iter()
-                .map(|&i| entries[i as usize].name.as_str())
-                .collect();
-            let split = names.iter().position(|n| !entries.iter().find(|e| e.name == *n).unwrap().is_dir());
-            let split = split.unwrap_or(names.len());
-            assert!(
-                names[..split].iter().all(|n| entries.iter().find(|e| e.name == *n).unwrap().is_dir()),
-                "dirs first failed for {spec:?}: {names:?}"
-            );
-            assert!(
-                names[split..].iter().all(|n| !entries.iter().find(|e| e.name == *n).unwrap().is_dir()),
-                "files after dirs failed for {spec:?}: {names:?}"
-            );
+            for ascending in [true, false] {
+                let spec = SortSpec { key, ascending };
+                let names = sorted(&entries, spec);
+                // Exactly one transition between the two kinds: one block each.
+                let flips = names
+                    .windows(2)
+                    .filter(|w| is_dir(w[0]) != is_dir(w[1]))
+                    .count();
+                assert_eq!(flips, 1, "folders split up for {spec:?}: {names:?}");
+                // ...and the folders are on the side the direction implies.
+                assert_eq!(
+                    is_dir(names[0]),
+                    ascending,
+                    "folder block on the wrong end for {spec:?}: {names:?}"
+                );
+            }
         }
+    }
+
+    #[test]
+    fn streaming_order_matches_the_side_folders_will_land_on() {
+        let entries = [entry("file.txt", false), entry("folder", true)];
+        assert_eq!(streaming_indices(&entries, true), vec![1, 0]);
+        assert_eq!(streaming_indices(&entries, false), vec![0, 1]);
+        assert_eq!(streaming_indices(&[], false), Vec::<u32>::new());
     }
 
     #[test]

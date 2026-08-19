@@ -5,6 +5,7 @@ mod compare;
 mod config;
 mod dialogs;
 mod icons;
+mod interact;
 mod jobs;
 mod keymap;
 mod preview;
@@ -19,7 +20,7 @@ use app::ScApp;
 
 impl eframe::App for ScApp {
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
-        crate::ui::recover_stuck_pointer(self, ctx, raw_input);
+        crate::ui::finish_ole_drag_gesture(self, ctx, raw_input);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {

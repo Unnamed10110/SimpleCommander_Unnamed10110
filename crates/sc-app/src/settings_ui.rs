@@ -561,6 +561,39 @@ fn color_rules_page(app: &mut ScApp, ui: &mut egui::Ui, persist: &mut bool) {
     if ui.button("Add rule").clicked() {
         add = true;
     }
+
+    // The default install ships archive and executable rules that nobody would
+    // ever find. Offering them as one-click presets makes the feature visible.
+    ui.add_space(14.0);
+    ui.weak("Presets");
+    ui.add_space(4.0);
+    let mut preset: Option<(&str, &str)> = None;
+    ui.horizontal_wrapped(|ui| {
+        for (pattern, hex, label) in PRESET_RULES {
+            let taken = app.settings.color_rules.iter().any(|r| r.pattern == *pattern);
+            let swatch = theme::parse_hex(hex).unwrap_or(Color32::GRAY);
+            let text = egui::RichText::new(format!("● {label}")).color(swatch);
+            if ui
+                .add_enabled(!taken, egui::Button::new(text).small())
+                .on_hover_text(if taken {
+                    format!("{pattern} already has a rule")
+                } else {
+                    format!("Tint {pattern}")
+                })
+                .clicked()
+            {
+                preset = Some((pattern, hex));
+            }
+        }
+    });
+
+    if let Some((pattern, hex)) = preset {
+        app.settings.color_rules.push(ColorRule {
+            pattern: pattern.to_string(),
+            color: hex.to_string(),
+        });
+        *persist = true;
+    }
     if let Some(i) = remove {
         app.settings.color_rules.remove(i);
         *persist = true;
@@ -573,6 +606,18 @@ fn color_rules_page(app: &mut ScApp, ui: &mut egui::Ui, persist: &mut bool) {
         *persist = true;
     }
 }
+
+/// One-click color rules for the file kinds people actually want to spot.
+const PRESET_RULES: &[(&str, &str, &str)] = &[
+    ("*.zip", "b08cff", "Archives"),
+    ("*.exe", "7fd48a", "Executables"),
+    ("*.dll", "6ab0d8", "Libraries"),
+    ("*.log", "8a8a8a", "Logs"),
+    ("*.md", "e8c46a", "Docs"),
+    ("*.rs", "ff8a5c", "Rust"),
+    ("*.json", "9adf6a", "Data"),
+    ("*.bak", "b0785c", "Backups"),
+];
 
 fn advanced_page(app: &mut ScApp, ui: &mut egui::Ui) {
     ui.heading("Advanced");

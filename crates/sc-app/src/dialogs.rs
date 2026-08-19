@@ -490,7 +490,7 @@ fn columns_dialog(app: &mut ScApp, ctx: &egui::Context) {
             if !cols.iter().any(|c| c.id == id) {
                 let pref = crate::config::ColumnPref {
                     id: id.into(),
-                    visible: id != "created" && id != "sha256",
+                    visible: id != "sha256",
                 };
                 if id == "index" {
                     cols.insert(0, pref);

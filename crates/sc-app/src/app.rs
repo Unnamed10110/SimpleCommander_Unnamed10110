@@ -241,6 +241,12 @@ pub struct ScApp {
     pub tree_pending: HashSet<PathBuf>,
     /// Screen rects of the panes from the last frame (for drop targeting).
     pub pane_rects: Vec<egui::Rect>,
+    /// Tab headers under a file drag: drop copies into that tab's folder.
+    pub drop_tab_hits: Vec<(egui::Rect, PathBuf)>,
+    /// Directory rows under a file drag: drop copies into that folder.
+    pub drop_dir_hits: Vec<(egui::Rect, PathBuf)>,
+    /// File-list bodies under a file drag: drop copies into the current folder.
+    pub drop_body_hits: Vec<(egui::Rect, PathBuf)>,
     /// Guard so only one OLE drag starts per gesture.
     pub drag_active: bool,
     /// Fraction of the dual split occupied by pane 0.
@@ -260,8 +266,12 @@ pub struct ScApp {
     pub pending_select: Option<(u64, Vec<String>)>,
     /// Scroll the file table to the cursor for this tab once.
     pub force_scroll_tab: Option<u64>,
-    /// Rubber-band selection in a file list (drag on empty space).
+    /// Rubber-band selection in a file list (drag on empty space or unselected rows).
     pub marquee: Option<Marquee>,
+    /// Mouse-down in the file list; used to tell click / marquee / file-drag apart.
+    pub list_press: Option<ListPress>,
+    /// Last file-list click, so double-click only opens the same item.
+    pub list_click: Option<ListClick>,
     /// Name prompt for New file / New folder.
     pub new_item: Option<NewItemPrompt>,
 }
@@ -272,9 +282,38 @@ pub struct Marquee {
     pub pane: usize,
     pub tab_uid: u64,
     pub origin: egui::Pos2,
+    /// Row the drag started on. `None` = empty space (below/around the list).
+    pub origin_view: Option<usize>,
+    /// Offset from that row's top, so the rubber-band stays pinned to the row.
+    pub origin_y_in_row: f32,
+    pub row_height: f32,
+    /// Edge autoscroll accumulator (rows).
+    pub scroll_acc: f32,
     /// Ctrl/Cmd held at drag start → union with the previous selection.
     pub additive: bool,
     pub keep: HashSet<u32>,
+}
+
+/// Primary-button press in a file list, until release or a drag is decided.
+#[derive(Clone)]
+pub struct ListPress {
+    pub pane: usize,
+    pub tab_uid: u64,
+    /// `None` when the press started on empty space below/around rows.
+    pub vpos: Option<usize>,
+    /// `None` when the press started on empty space below/around rows.
+    pub ei: Option<u32>,
+    pub was_selected: bool,
+    pub ctrl: bool,
+    pub shift: bool,
+}
+
+/// Previous click in a file list (Explorer-style double-click = same item).
+pub struct ListClick {
+    pub tab_uid: u64,
+    pub path: PathBuf,
+    pub name: String,
+    pub at: Instant,
 }
 
 impl ScApp {
@@ -454,6 +493,9 @@ impl ScApp {
             tree_open: HashSet::new(),
             tree_pending: HashSet::new(),
             pane_rects: Vec::new(),
+            drop_tab_hits: Vec::new(),
+            drop_dir_hits: Vec::new(),
+            drop_body_hits: Vec::new(),
             drag_active: false,
             split_ratio: session.split_ratio.clamp(0.15, 0.85),
             sidebar_width: session.sidebar_width.clamp(140.0, 480.0),
@@ -465,6 +507,8 @@ impl ScApp {
             pending_select: None,
             force_scroll_tab: None,
             marquee: None,
+            list_press: None,
+            list_click: None,
             new_item: None,
         };
         app.tree_open = session.tree_expanded.iter().cloned().collect();
@@ -552,6 +596,9 @@ impl ScApp {
     }
 
     pub fn navigate(&mut self, pane: usize, to: PathBuf) {
+        self.list_click = None;
+        self.list_press = None;
+        self.marquee = None;
         self.remember_unc(&to);
         let tab = self.panes[pane].tab_mut();
         if tab.locked && tab.path != to {
@@ -571,6 +618,9 @@ impl ScApp {
     }
 
     pub fn history_forward(&mut self, pane: usize) {
+        self.list_click = None;
+        self.list_press = None;
+        self.marquee = None;
         if self.panes[pane].tab_mut().go_forward() {
             self.request_listing(pane, false);
         }
@@ -589,6 +639,9 @@ impl ScApp {
             .map(|n| n.to_string_lossy().into_owned());
         let uid = tab.uid;
         if nav(self.panes[pane].tab_mut()) {
+            self.list_click = None;
+            self.list_press = None;
+            self.marquee = None;
             if let Some(name) = name {
                 self.pending_select = Some((uid, vec![name]));
             }
@@ -884,10 +937,9 @@ impl ScApp {
         let tab = &mut self.panes[pane].tabs[tab_index];
         tab.selection = selected;
         tab.cursor = cursor;
+        tab.anchor = cursor;
         self.pending_select = None;
         self.force_scroll_tab = Some(uid);
-        self.active_pane = pane;
-        self.panes[pane].active_tab = tab_index;
     }
 
     fn best_tab_uid_for_path(&self, dest: &Path) -> Option<u64> {
@@ -914,6 +966,7 @@ impl ScApp {
         None
     }
 
+    #[allow(dead_code)]
     fn focus_tab_uid(&mut self, uid: u64) {
         if let Some((pane, ti)) = self.find_tab_by_uid(uid) {
             self.active_pane = pane;
@@ -941,7 +994,7 @@ impl ScApp {
             return;
         };
         self.pending_select = Some((uid, names));
-        self.focus_tab_uid(uid);
+        // Keep the current tab focused; the dest tab still gets the selection.
     }
 
     fn handle_msg(&mut self, ctx: &egui::Context, msg: UiMsg) {
@@ -1337,6 +1390,7 @@ impl ScApp {
             .filter(|p| *p != dest && !dest.starts_with(p))
             .collect();
         if sources.is_empty() {
+            self.toast("Nothing to copy here (same folder, or dropping a folder into itself)".into(), false);
             return;
         }
         let op = if is_move {
@@ -1383,7 +1437,6 @@ impl ScApp {
             }
             let uid = self.panes[other].tab().uid;
             self.pending_select = Some((uid, names));
-            self.focus_tab_uid(uid);
             self.refresh_all_matching(&[dest]);
             return;
         }

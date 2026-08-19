@@ -69,7 +69,7 @@ pub fn default_columns() -> Vec<ColumnPref> {
         ColumnPref { id: "size".into(), visible: true },
         ColumnPref { id: "type".into(), visible: true },
         ColumnPref { id: "modified".into(), visible: true },
-        ColumnPref { id: "created".into(), visible: false },
+        ColumnPref { id: "created".into(), visible: true },
         ColumnPref { id: "sha256".into(), visible: false },
     ]
 }

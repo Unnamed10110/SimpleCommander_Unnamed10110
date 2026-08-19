@@ -1,20 +1,24 @@
 //! Main window layout: toolbar, dual panes (tabs + virtualized file table),
 //! status bar, keyboard handling, drag & drop.
 
-use crate::app::{AddressEdit, Marquee, ScApp, SearchMode, TabRename};
+use crate::app::{AddressEdit, ListClick, ListPress, Marquee, ScApp, SearchMode, TabRename};
 use crate::jobs::Job;
 use crate::theme::LABEL_COLORS;
 use egui::text::CCursorRange;
 use egui::{Align2, Color32, CursorIcon, Key, Modifiers, Rect, RichText, Sense, TextEdit, Ui};
 use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 use egui_extras::{Column, TableBuilder};
 use sc_core::entry::format_size;
 use sc_core::sort::SortKey;
 use sc_core::state::{PaneLayout, SplitDirection, TabState};
-use std::path::PathBuf;
 
 pub fn draw(app: &mut ScApp, ui: &mut Ui) {
+    app.drop_tab_hits.clear();
+    app.drop_dir_hits.clear();
+    app.drop_body_hits.clear();
     let ctx = ui.ctx().clone();
     handle_global_keys(app, &ctx);
     top_bar(app, ui);
@@ -321,14 +325,22 @@ fn list_navigation_keys(app: &mut ScApp, ctx: &egui::Context, pane: usize) {
     {
         moved = Some(-1);
     }
-    if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::PageDown)) {
+    if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::PageDown))
+        || (shift && ctx.input_mut(|i| i.consume_key(Modifiers::SHIFT, Key::PageDown)))
+    {
         moved = Some(20);
     }
-    if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::PageUp)) {
+    if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::PageUp))
+        || (shift && ctx.input_mut(|i| i.consume_key(Modifiers::SHIFT, Key::PageUp)))
+    {
         moved = Some(-20);
     }
-    let home = ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Home));
-    let end = ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::End));
+    let home = ctx.input_mut(|i| {
+        i.consume_key(Modifiers::NONE, Key::Home) || i.consume_key(Modifiers::SHIFT, Key::Home)
+    });
+    let end = ctx.input_mut(|i| {
+        i.consume_key(Modifiers::NONE, Key::End) || i.consume_key(Modifiers::SHIFT, Key::End)
+    });
 
     let tab = app.panes[pane].tab_mut();
     if tab.view.is_empty() {
@@ -345,20 +357,7 @@ fn list_navigation_keys(app: &mut ScApp, ctx: &egui::Context, pane: usize) {
         new_pos = Some((cur + delta).clamp(0, max as isize) as usize);
     }
     if let Some(pos) = new_pos {
-        let entry = tab.view[pos];
-        if shift {
-            // Extend range from previous cursor.
-            let from = tab.cursor.unwrap_or(pos);
-            tab.selection.clear();
-            let (a, b) = (from.min(pos), from.max(pos));
-            for &e in &tab.view[a..=b] {
-                tab.selection.insert(e);
-            }
-        } else {
-            tab.selection.clear();
-            tab.selection.insert(entry);
-        }
-        tab.cursor = Some(pos);
+        tab.move_cursor(pos, shift);
         app.force_scroll_tab = Some(tab.uid);
         update_preview_from_selection(app, pane);
     }
@@ -429,6 +428,7 @@ fn type_ahead(app: &mut ScApp, ctx: &egui::Context, pane: usize) {
         tab.selection.clear();
         tab.selection.insert(entry);
         tab.cursor = Some(pos);
+        tab.anchor = Some(pos);
         app.force_scroll_tab = Some(tab.uid);
     }
 }
@@ -968,6 +968,30 @@ fn dnd_release<T: std::any::Any + Send + Sync>(resp: &egui::Response) -> Option<
     }
 }
 
+fn pointer_pos(ui: &Ui) -> Option<egui::Pos2> {
+    ui.input(|i| i.pointer.interact_pos().or(i.pointer.hover_pos()).or(i.pointer.latest_pos()))
+}
+
+fn pointer_pos_ctx(ctx: &egui::Context) -> Option<egui::Pos2> {
+    ctx.pointer_interact_pos()
+        .or_else(|| ctx.pointer_hover_pos())
+        .or_else(|| ctx.pointer_latest_pos())
+}
+
+fn take_file_drop(ctx: &egui::Context) -> Option<std::sync::Arc<FileDrag>> {
+    if ctx.input(|i| i.pointer.any_released()) {
+        egui::DragAndDrop::take_payload::<FileDrag>(ctx)
+    } else {
+        None
+    }
+}
+
+fn dest_under_pointer(hits: &[(egui::Rect, PathBuf)], pos: egui::Pos2) -> Option<PathBuf> {
+    hits.iter()
+        .find(|(r, _)| r.contains(pos))
+        .map(|(_, p)| p.clone())
+}
+
 fn drop_is_move(ui: &Ui) -> bool {
     ui.input(|i| i.modifiers.ctrl || i.modifiers.command)
 }
@@ -1070,7 +1094,6 @@ fn tab_bar(app: &mut ScApp, ui: &mut Ui, pane: usize) {
     let mut set_color: Option<(usize, Option<String>)> = None;
     let mut drop_at: Option<(TabDrag, usize)> = None;
     let mut drop_append: Option<TabDrag> = None;
-    let mut file_drop: Option<(Vec<PathBuf>, PathBuf)> = None;
     let mut rename_commit = false;
     let mut rename_cancel = false;
     let mut need_dir_icon = false;
@@ -1182,23 +1205,31 @@ fn tab_bar(app: &mut ScApp, ui: &mut Ui, pane: usize) {
                         )
                         .on_hover_cursor(CursorIcon::Default);
                     let on_close = close_rect.is_some_and(|cr| ui.rect_contains_pointer(cr));
-                    if on_close {
+                    let dragging_files = egui::DragAndDrop::has_payload_of_type::<FileDrag>(ui.ctx());
+                    let dest = app.panes[pane].tabs[i].path.clone();
+                    app.drop_tab_hits.push((r, dest.clone()));
+                    let over_tab = pointer_pos(ui).is_some_and(|p| r.contains(p));
+                    if dragging_files {
+                        if over_tab {
+                            let allowed = egui::DragAndDrop::payload::<FileDrag>(ui.ctx())
+                                .is_some_and(|d| drop_allowed(&d.paths, &dest));
+                            paint_file_drop_target(ui, r, accent, allowed);
+                        }
+                    } else if on_close {
                         if tab_resp.clicked() {
                             close = Some(i);
                         }
                     } else {
                         tab_resp.dnd_set_drag_payload(TabDrag { uid });
-                        if !egui::DragAndDrop::has_payload_of_type::<FileDrag>(ui.ctx()) {
-                            if tab_resp.dnd_hover_payload::<TabDrag>().is_some() {
-                                ui.painter().vline(
-                                    r.left(),
-                                    r.y_range(),
-                                    egui::Stroke::new(2.0, accent),
-                                );
-                            }
-                            if let Some(d) = dnd_release::<TabDrag>(&tab_resp) {
-                                drop_at = Some(((*d).clone(), i));
-                            }
+                        if tab_resp.dnd_hover_payload::<TabDrag>().is_some() {
+                            ui.painter().vline(
+                                r.left(),
+                                r.y_range(),
+                                egui::Stroke::new(2.0, accent),
+                            );
+                        }
+                        if let Some(d) = dnd_release::<TabDrag>(&tab_resp) {
+                            drop_at = Some(((*d).clone(), i));
                         }
                         if tab_resp.clicked() {
                             switch_to = Some(i);
@@ -1240,17 +1271,6 @@ fn tab_bar(app: &mut ScApp, ui: &mut Ui, pane: usize) {
                                 ui.close();
                             }
                         });
-                    }
-                }
-                if let Some(drag) = egui::DragAndDrop::payload::<FileDrag>(ui.ctx()) {
-                    if ui.rect_contains_pointer(r) {
-                        let dest = &app.panes[pane].tabs[i].path;
-                        paint_file_drop_target(ui, r, accent, drop_allowed(&drag.paths, dest));
-                        if ui.input(|inp| inp.pointer.any_released()) {
-                            file_drop =
-                                Some((drag.paths.clone(), app.panes[pane].tabs[i].path.clone()));
-                            egui::DragAndDrop::take_payload::<FileDrag>(ui.ctx());
-                        }
                     }
                 }
                 if let Some(c) = tab_color {
@@ -1351,9 +1371,6 @@ fn tab_bar(app: &mut ScApp, ui: &mut Ui, pane: usize) {
         }
     } else if rename_cancel {
         app.tab_rename = None;
-    }
-    if let Some((sources, dest)) = file_drop {
-        app.drop_files_into(sources, dest, drop_is_move(ui));
     }
     if let Some((drag, to_index)) = drop_at {
         if let Some((from_pane, from_index)) = app.find_tab_by_uid(drag.uid) {
@@ -1574,6 +1591,62 @@ fn visible_columns(app: &ScApp, plugin_columns: &[(usize, String)]) -> Vec<ColKi
     out
 }
 
+fn column_label(id: &str) -> String {
+    match id {
+        "index" => "#".to_string(),
+        "name" => "Name".to_string(),
+        "size" => "Size".to_string(),
+        "type" => "Type".to_string(),
+        "modified" => "Modified".to_string(),
+        "created" => "Created".to_string(),
+        "sha256" => "SHA-256".to_string(),
+        id if id.starts_with("plugin:") => id["plugin:".len()..].to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// Entries for the header right-click column picker: (id, label, visible), in
+/// the user's saved order, plus any plugin columns that don't have a pref yet
+/// (shown as visible, matching `visible_columns`' default-on fallback).
+fn column_menu_entries(app: &ScApp, plugin_columns: &[(usize, String)]) -> Vec<(String, String, bool)> {
+    let mut out: Vec<(String, String, bool)> = app
+        .settings
+        .columns
+        .iter()
+        .filter(|c| c.id != "name")
+        .map(|c| (c.id.clone(), column_label(&c.id), c.visible))
+        .collect();
+    for (_, title) in plugin_columns {
+        let id = format!("plugin:{title}");
+        if !out.iter().any(|(existing, _, _)| *existing == id) {
+            out.push((id, title.clone(), true));
+        }
+    }
+    out
+}
+
+/// Right-click header menu: toggle column visibility inline, with a link to
+/// the full Columns dialog for reordering / reset.
+fn column_picker_menu(
+    ui: &mut Ui,
+    columns: &[(String, String, bool)],
+    toggle: &mut Option<String>,
+    open_columns: &mut bool,
+) {
+    ui.label(RichText::new("Columns").weak());
+    for (id, label, visible) in columns {
+        let mut v = *visible;
+        if ui.checkbox(&mut v, label).changed() {
+            *toggle = Some(id.clone());
+        }
+    }
+    ui.separator();
+    if ui.button("More columns…").clicked() {
+        *open_columns = true;
+        ui.close();
+    }
+}
+
 /// Make a table cell's interact rect cover the whole cell, not just the label.
 fn row_cell(row: &mut egui_extras::TableRow<'_, '_>, add: impl FnOnce(&mut Ui)) {
     row.col(|ui| {
@@ -1610,15 +1683,13 @@ fn col_header(kind: &ColKind) -> (&'static str, Option<SortKey>) {
 
 struct RowAction {
     open: Option<u32>,
-    select_single: Option<(u32, usize)>,
-    toggle: Option<(u32, usize)>,
-    range_to: Option<usize>,
+    press_row: Option<(u32, usize, bool)>,
+    click_row: Option<(u32, usize)>,
     context_on: Option<u32>,
     open_new_tab: Option<PathBuf>,
     windows_menu: bool,
     row_menu_pos: Option<egui::Pos2>,
     drop_into: Option<(Vec<PathBuf>, PathBuf, bool)>,
-    start_marquee: bool,
 }
 
 fn view_index_at_y(row_rects: &[(usize, Rect)], y: f32, n: usize) -> usize {
@@ -1672,6 +1743,39 @@ fn apply_marquee_range(
         }
     }
     tab.cursor = Some(to.min(n - 1));
+    tab.anchor = Some(from.min(n - 1));
+}
+
+fn apply_marquee_hits(
+    tab: &mut TabState,
+    hits: Option<(usize, usize)>,
+    toward: usize,
+    additive: bool,
+    keep: &HashSet<u32>,
+) {
+    match hits {
+        Some((lo, hi)) => {
+            let to = if toward <= lo {
+                lo
+            } else if toward >= hi {
+                hi
+            } else if (toward - lo) <= (hi - toward) {
+                lo
+            } else {
+                hi
+            };
+            let from = if to == lo { hi } else { lo };
+            apply_marquee_range(tab, from, to, additive, keep);
+        }
+        None if additive => {
+            tab.selection = keep.clone();
+        }
+        None => {
+            tab.selection.clear();
+            tab.cursor = None;
+            tab.anchor = None;
+        }
+    }
 }
 
 fn paint_marquee(ui: &Ui, rect: Rect, accent: Color32) {
@@ -1683,6 +1787,74 @@ fn paint_marquee(ui: &Ui, rect: Rect, accent: Color32) {
         egui::Stroke::new(1.0, accent),
         egui::StrokeKind::Inside,
     );
+}
+
+/// Rows whose rects intersect `band`. Does not snap empty space onto the last row.
+fn marquee_hit_range(
+    row_rects: &[(usize, Rect)],
+    band: Rect,
+    n: usize,
+    row_height: f32,
+) -> Option<(usize, usize)> {
+    if n == 0 || band.width() <= 0.0 || band.height() <= 0.0 {
+        return None;
+    }
+    let mut lo: Option<usize> = None;
+    let mut hi: Option<usize> = None;
+    let mut cover = |i: usize| {
+        let i = i.min(n - 1);
+        lo = Some(lo.map_or(i, |x| x.min(i)));
+        hi = Some(hi.map_or(i, |x| x.max(i)));
+    };
+    for &(v, r) in row_rects {
+        if r.intersects(band) {
+            cover(v);
+        }
+    }
+    if let Some(&(first, r0)) = row_rects.first() {
+        if first > 0 && band.min.y < r0.min.y {
+            let h = row_height.max(1.0);
+            let extra = ((r0.min.y - band.min.y) / h).ceil() as usize;
+            cover(first.saturating_sub(extra.max(1)));
+        }
+    }
+    if let Some(&(last, r1)) = row_rects.last() {
+        if last + 1 < n && band.max.y > r1.max.y {
+            let h = row_height.max(1.0);
+            let extra = ((band.max.y - r1.max.y) / h).ceil() as usize;
+            cover(last.saturating_add(extra.max(1)));
+        }
+    }
+    Some((lo?, hi?))
+}
+
+fn marquee_origin_pos(m: &Marquee, row_rects: &[(usize, Rect)]) -> egui::Pos2 {
+    let Some(origin_view) = m.origin_view else {
+        return m.origin;
+    };
+    let h = m.row_height.max(1.0);
+    let y = if let Some((_, r)) = row_rects.iter().copied().find(|(v, _)| *v == origin_view) {
+        r.min.y + m.origin_y_in_row.clamp(0.0, r.height().max(1.0))
+    } else if let Some((first, r0)) = row_rects.first().copied() {
+        if origin_view < first {
+            r0.min.y - (first - origin_view) as f32 * h + m.origin_y_in_row
+        } else if let Some((last, r1)) = row_rects.last().copied() {
+            r1.min.y + (origin_view - last) as f32 * h + m.origin_y_in_row
+        } else {
+            m.origin.y
+        }
+    } else {
+        m.origin.y
+    };
+    egui::pos2(m.origin.x, y)
+}
+
+const LIST_DOUBLE_CLICK: Duration = Duration::from_millis(500);
+
+fn is_same_item_double_click(app: &ScApp, tab_uid: u64, path: &Path, name: &str) -> bool {
+    app.list_click.as_ref().is_some_and(|c| {
+        c.tab_uid == tab_uid && c.path == path && c.name == name && c.at.elapsed() <= LIST_DOUBLE_CLICK
+    })
 }
 
 fn file_table(app: &mut ScApp, ui: &mut Ui, pane: usize) {
@@ -1725,15 +1897,13 @@ fn file_table(app: &mut ScApp, ui: &mut Ui, pane: usize) {
 
     let mut action = RowAction {
         open: None,
-        select_single: None,
-        toggle: None,
-        range_to: None,
+        press_row: None,
+        click_row: None,
         context_on: None,
         open_new_tab: None,
         windows_menu: false,
         row_menu_pos: None,
         drop_into: None,
-        start_marquee: false,
     };
     let mut sort_click: Option<SortKey> = None;
     let mut rename_commit = false;
@@ -1758,7 +1928,10 @@ fn file_table(app: &mut ScApp, ui: &mut Ui, pane: usize) {
     let single_click = app.settings.single_click_open;
     let cols = visible_columns(app, &plugin_columns);
     let mut open_columns = false;
+    let mut toggle_column: Option<String> = None;
+    let menu_columns = column_menu_entries(app, &plugin_columns);
     let force_scroll = app.force_scroll_tab == Some(tab_uid);
+    let restore_scroll = app.panes[pane].tab().scroll_y;
     let wants_scroll = ctx_wants_scroll(ui)
         || app
             .rename
@@ -1767,16 +1940,16 @@ fn file_table(app: &mut ScApp, ui: &mut Ui, pane: usize) {
         || force_scroll;
     let table_rect = ui.max_rect();
     let mut row_got_secondary = false;
-    let mut dropped_on_dir = false;
     let mut dir_drop_hover = false;
     let mut pointer_on_row = false;
     let mut row_rects: Vec<(usize, Rect)> = Vec::new();
-    {
+    let new_scroll_y = {
         let n = view.len();
         let avail_height = ui.available_height();
         let header_h = 22.0;
         let body_h = (avail_height - header_h).max(1.0);
         let mut table = TableBuilder::new(ui)
+            .id_salt(("files", pane, tab_uid))
             .striped(striped)
             .resizable(true)
             .min_scrolled_height(body_h)
@@ -1796,9 +1969,11 @@ fn file_table(app: &mut ScApp, ui: &mut Ui, pane: usize) {
         }
         if let (Some(pos), true) = (cursor, wants_scroll) {
             table = table.scroll_to_row(pos, None);
+        } else {
+            table = table.vertical_scroll_offset(restore_scroll);
         }
 
-        table
+        let scroll_out = table
             .header(22.0, |mut header| {
                 if has_index {
                     let (_rect, resp) = header.col(|ui| {
@@ -1812,10 +1987,7 @@ fn file_table(app: &mut ScApp, ui: &mut Ui, pane: usize) {
                         );
                     });
                     resp.context_menu(|ui| {
-                        if ui.button("Columns...").clicked() {
-                            open_columns = true;
-                            ui.close();
-                        }
+                        column_picker_menu(ui, &menu_columns, &mut toggle_column, &mut open_columns);
                     });
                 }
                 if show_icons {
@@ -1852,10 +2024,7 @@ fn file_table(app: &mut ScApp, ui: &mut Ui, pane: usize) {
                         sort_click = key;
                     }
                     resp.context_menu(|ui| {
-                        if ui.button("Columns...").clicked() {
-                            open_columns = true;
-                            ui.close();
-                        }
+                        column_picker_menu(ui, &menu_columns, &mut toggle_column, &mut open_columns);
                     });
                 }
             })
@@ -1866,6 +2035,9 @@ fn file_table(app: &mut ScApp, ui: &mut Ui, pane: usize) {
                     let entry = &entries[ei as usize];
                     let selected = selection.contains(&ei);
                     row.set_selected(selected);
+                    if cursor == Some(vpos) {
+                        row.set_hovered(true);
+                    }
 
                     if has_index {
                     row_cell(&mut row, |ui| {
@@ -2069,38 +2241,57 @@ fn file_table(app: &mut ScApp, ui: &mut Ui, pane: usize) {
                     row_rect.max.x = (table_rect.max.x - 16.0).max(resp.rect.max.x);
                     row_rects.push((vpos, row_rect));
                     let pointer_in_row = resp.contains_pointer()
-                        || resp.ctx.rect_contains_pointer(resp.layer_id, row_rect);
+                        || resp.ctx.rect_contains_pointer(resp.layer_id, row_rect)
+                        || pointer_pos_ctx(&resp.ctx).is_some_and(|p| row_rect.contains(p));
                     if pointer_in_row {
                         pointer_on_row = true;
                     }
-                    let (clicked, double_clicked, secondary_clicked, middle_clicked) =
-                        if resp.clicked()
-                            || resp.double_clicked()
+                    let (clicked, secondary_clicked, middle_clicked, pressed) =
+                        if resp.clicked_by(egui::PointerButton::Primary)
                             || resp.secondary_clicked()
                             || resp.middle_clicked()
                         {
                             (
-                                resp.clicked(),
-                                resp.double_clicked(),
+                                resp.clicked_by(egui::PointerButton::Primary),
                                 resp.secondary_clicked(),
                                 resp.middle_clicked(),
+                                false,
                             )
                         } else if pointer_in_row {
                             resp.ctx.input(|i| {
                                 (
                                     i.pointer.primary_clicked(),
-                                    i.pointer.button_double_clicked(egui::PointerButton::Primary),
                                     i.pointer.button_clicked(egui::PointerButton::Secondary),
                                     i.pointer.button_clicked(egui::PointerButton::Middle),
+                                    i.pointer.primary_pressed(),
                                 )
                             })
                         } else {
                             (false, false, false, false)
                         };
+                    let pressed = pressed
+                        || (pointer_in_row && resp.ctx.input(|i| i.pointer.primary_pressed()));
+                    if cursor == Some(vpos) {
+                        resp.ctx.layer_painter(resp.layer_id).rect_stroke(
+                            row_rect,
+                            0.0,
+                            egui::Stroke::new(1.0, theme.accent),
+                            egui::StrokeKind::Inside,
+                        );
+                    }
                     if entry.is_dir() {
-                        if let Some(drag) = resp.dnd_hover_payload::<FileDrag>() {
-                            let dest = dir_path.join(&entry.name);
-                            let allowed = drop_allowed(&drag.paths, &dest);
+                        app.drop_dir_hits.push((row_rect, dir_path.join(&entry.name)));
+                    }
+                    if let Some(drag) = egui::DragAndDrop::payload::<FileDrag>(&resp.ctx)
+                        .filter(|_| pointer_pos_ctx(&resp.ctx).is_some_and(|p| row_rect.contains(p)))
+                    {
+                        let dest = if entry.is_dir() {
+                            dir_path.join(&entry.name)
+                        } else {
+                            dir_path.clone()
+                        };
+                        let allowed = drop_allowed(&drag.paths, &dest);
+                        if entry.is_dir() {
                             let color = if allowed {
                                 theme.accent
                             } else {
@@ -2116,55 +2307,43 @@ fn file_table(app: &mut ScApp, ui: &mut Ui, pane: usize) {
                                 egui::Stroke::new(2.0, color),
                                 egui::StrokeKind::Inside,
                             );
-                            resp.ctx.set_cursor_icon(if !allowed {
-                                CursorIcon::NotAllowed
-                            } else if resp.ctx.input(|i| i.modifiers.ctrl) {
-                                CursorIcon::Move
-                            } else {
-                                CursorIcon::Copy
-                            });
                             dir_drop_hover = true;
                         }
-                        if let Some(d) = dnd_release::<FileDrag>(&resp) {
-                            action.drop_into = Some((
-                                d.paths.clone(),
-                                dir_path.join(&entry.name),
-                                resp.ctx.input(|i| i.modifiers.ctrl),
-                            ));
-                            dropped_on_dir = true;
-                        }
-                    }
-                    if resp.drag_started() && app.marquee.is_none() {
-                        let paths: Vec<PathBuf> = if selected {
-                            selection
-                                .iter()
-                                .filter_map(|&idx| {
-                                    entries.get(idx as usize).map(|e| dir_path.join(&e.name))
-                                })
-                                .collect()
+                        resp.ctx.set_cursor_icon(if !allowed {
+                            CursorIcon::NotAllowed
+                        } else if resp.ctx.input(|i| i.modifiers.ctrl) {
+                            CursorIcon::Move
                         } else {
-                            vec![dir_path.join(&entry.name)]
-                        };
+                            CursorIcon::Copy
+                        });
+                    }
+                    let ctrl_drag = resp.ctx.input(|i| i.modifiers.ctrl || i.modifiers.command);
+                    if resp.drag_started()
+                        && selected
+                        && !ctrl_drag
+                        && app.marquee.is_none()
+                        && app.rename.is_none()
+                    {
+                        let paths: Vec<PathBuf> = selection
+                            .iter()
+                            .filter_map(|&idx| {
+                                entries.get(idx as usize).map(|e| dir_path.join(&e.name))
+                            })
+                            .collect();
                         if !paths.is_empty() {
                             resp.dnd_set_drag_payload(FileDrag { paths });
-                            if !selected {
-                                action.select_single = Some((ei, vpos));
-                            }
                         }
-                    } else if double_clicked {
-                        action.open = Some(ei);
-                    } else if clicked {
-                        let mods = resp.ctx.input(|i| i.modifiers);
-                        if mods.ctrl {
-                            action.toggle = Some((ei, vpos));
-                        } else if mods.shift {
-                            action.range_to = Some(vpos);
-                        } else {
-                            action.select_single = Some((ei, vpos));
-                            if single_click {
-                                action.open = Some(ei);
-                            }
-                        }
+                    }
+                    if pressed
+                        && !egui::DragAndDrop::has_payload_of_type::<FileDrag>(&resp.ctx)
+                    {
+                        action.press_row = Some((ei, vpos, selected));
+                    }
+                    if clicked
+                        && !egui::DragAndDrop::has_payload_of_type::<FileDrag>(&resp.ctx)
+                        && action.drop_into.is_none()
+                    {
+                        action.click_row = Some((ei, vpos));
                     }
                     let shift_rclick = resp.ctx.input(|i| i.modifiers.shift);
                     if secondary_clicked {
@@ -2182,9 +2361,19 @@ fn file_table(app: &mut ScApp, ui: &mut Ui, pane: usize) {
                     }
                 });
             });
-    }
+        scroll_out.state.offset.y
+    };
+    app.panes[pane].tab_mut().scroll_y = new_scroll_y;
     if open_columns {
         app.show_columns = true;
+    }
+    if let Some(id) = toggle_column {
+        if let Some(pref) = app.settings.columns.iter_mut().find(|c| c.id == id) {
+            pref.visible = !pref.visible;
+        } else {
+            app.settings.columns.push(crate::config::ColumnPref { id, visible: false });
+        }
+        app.persist_settings();
     }
 
     let body_rect = egui::Rect::from_min_max(
@@ -2199,6 +2388,7 @@ fn file_table(app: &mut ScApp, ui: &mut Ui, pane: usize) {
         ui.id().with(("file-drop-zone", pane, tab_uid)),
         Sense::hover(),
     );
+    app.drop_body_hits.push((body_rect, dir_path.clone()));
     if !dir_drop_hover {
         if let Some(drag) = drop_resp.dnd_hover_payload::<FileDrag>() {
             paint_file_drop_target(
@@ -2207,11 +2397,12 @@ fn file_table(app: &mut ScApp, ui: &mut Ui, pane: usize) {
                 theme.accent,
                 drop_allowed(&drag.paths, &dir_path),
             );
-        }
-    }
-    if !dropped_on_dir {
-        if let Some(d) = dnd_release::<FileDrag>(&drop_resp) {
-            app.drop_files_into(d.paths.clone(), dir_path.clone(), drop_is_move(ui));
+        } else if egui::DragAndDrop::has_payload_of_type::<FileDrag>(ui.ctx())
+            && pointer_pos(ui).is_some_and(|p| body_rect.contains(p))
+        {
+            let allowed = egui::DragAndDrop::payload::<FileDrag>(ui.ctx())
+                .is_some_and(|d| drop_allowed(&d.paths, &dir_path));
+            paint_file_drop_target(ui, body_rect, theme.accent, allowed);
         }
     }
     let shift_held = ui.input(|i| i.modifiers.shift);
@@ -2232,25 +2423,84 @@ fn file_table(app: &mut ScApp, ui: &mut Ui, pane: usize) {
         i.pointer.latest_pos().is_some_and(|p| p.x >= body_rect.max.x - scroll_gutter)
     });
     let dragging_files = egui::DragAndDrop::has_payload_of_type::<FileDrag>(ui.ctx());
-    let drag_started = ui.input(|i| i.pointer.is_decidedly_dragging() && i.pointer.primary_down());
-    let empty_marquee = drag_started
+    let mods = ui.input(|i| i.modifiers);
+    let ctrl = mods.ctrl || mods.command;
+    let shift = mods.shift;
+
+    if let Some((ei, vpos, was_selected)) = action.press_row {
+        app.list_press = Some(ListPress {
+            pane,
+            tab_uid,
+            vpos: Some(vpos),
+            ei: Some(ei),
+            was_selected,
+            ctrl,
+            shift,
+        });
+        if shift {
+            app.panes[pane].tab_mut().move_cursor(vpos, true);
+            update_preview_from_selection(app, pane);
+        } else if !ctrl && !was_selected {
+            app.panes[pane].tab_mut().move_cursor(vpos, false);
+            update_preview_from_selection(app, pane);
+        } else if !ctrl {
+            app.panes[pane].tab_mut().cursor = Some(vpos);
+        }
+    } else if ui.input(|i| i.pointer.primary_pressed())
+        && ui.rect_contains_pointer(body_rect)
         && !pointer_on_row
         && !in_scroll_gutter
+        && app.rename.is_none()
+        && !egui::DragAndDrop::has_payload_of_type::<FileDrag>(ui.ctx())
+    {
+        app.list_press = Some(ListPress {
+            pane,
+            tab_uid,
+            vpos: None,
+            ei: None,
+            was_selected: false,
+            ctrl,
+            shift,
+        });
+    }
+
+    let decidedly_drag = ui.input(|i| i.pointer.is_decidedly_dragging() && i.pointer.primary_down());
+    let press = app
+        .list_press
+        .as_ref()
+        .filter(|p| p.pane == pane && p.tab_uid == tab_uid);
+    let marquee_from_press = press.is_some_and(|p| p.ei.is_none() || !p.was_selected || p.ctrl);
+    if app.marquee.is_none()
+        && decidedly_drag
+        && marquee_from_press
         && !dragging_files
         && app.rename.is_none()
-        && ui.rect_contains_pointer(body_rect);
-    if (action.start_marquee || empty_marquee) && app.marquee.is_none() && !dragging_files {
+    {
         if let Some(origin) = ui.input(|i| i.pointer.press_origin()) {
-            let additive = ui.input(|i| i.modifiers.ctrl || i.modifiers.command);
+            let additive = press.map(|p| p.ctrl).unwrap_or(ctrl);
             let keep = if additive {
                 app.panes[pane].tab().selection.clone()
             } else {
                 HashSet::new()
             };
+            let origin_view = press.and_then(|p| p.vpos);
+            let origin_y_in_row = origin_view
+                .and_then(|v| {
+                    row_rects
+                        .iter()
+                        .find(|(i, _)| *i == v)
+                        .map(|(_, r)| (origin.y - r.min.y).clamp(0.0, r.height().max(1.0)))
+                })
+                .unwrap_or(0.0);
+            egui::DragAndDrop::clear_payload(ui.ctx());
             app.marquee = Some(Marquee {
                 pane,
                 tab_uid,
                 origin,
+                origin_view,
+                origin_y_in_row,
+                row_height,
+                scroll_acc: 0.0,
                 additive,
                 keep,
             });
@@ -2259,51 +2509,72 @@ fn file_table(app: &mut ScApp, ui: &mut Ui, pane: usize) {
 
     let mut marquee_ended = false;
     let mut marquee_scroll = false;
-    let marquee_now = app.marquee.clone().filter(|m| m.pane == pane && m.tab_uid == tab_uid);
-    if dragging_files && marquee_now.is_some() {
+    let marquee_here = app
+        .marquee
+        .as_ref()
+        .is_some_and(|m| m.pane == pane && m.tab_uid == tab_uid);
+    if dragging_files && marquee_here {
         marquee_ended = true;
-    } else if let Some(m) = marquee_now {
+    } else if marquee_here {
         let pos = ui
             .input(|i| i.pointer.interact_pos().or(i.pointer.hover_pos()))
-            .unwrap_or(m.origin);
+            .unwrap_or(app.marquee.as_ref().map(|m| m.origin).unwrap_or(egui::pos2(0.0, 0.0)));
         let n = view.len();
-        if n > 0 {
-            let from = view_index_at_y(&row_rects, m.origin.y, n);
-            let to = view_index_at_y(&row_rects, pos.y, n);
-            apply_marquee_range(app.panes[pane].tab_mut(), from, to, m.additive, &m.keep);
-        }
-        let band = Rect::from_two_pos(m.origin, pos).intersect(body_rect);
-        if band.width() > 1.0 && band.height() > 1.0 {
-            paint_marquee(ui, band, theme.accent);
-        }
         let primary_down = ui.input(|i| i.pointer.primary_down());
+        const EDGE: f32 = 20.0;
+        let at_top = pos.y < body_rect.min.y + EDGE;
+        let at_bottom = pos.y > body_rect.max.y - EDGE;
         if primary_down {
             ui.ctx().request_repaint();
-            const EDGE: f32 = 20.0;
-            if pos.y < body_rect.min.y + EDGE {
-                if let Some(c) = app.panes[pane].tab().cursor {
-                    if c > 0 {
-                        app.panes[pane].tab_mut().cursor = Some(c - 1);
-                        app.force_scroll_tab = Some(tab_uid);
-                        marquee_scroll = true;
-                    }
-                }
-            } else if pos.y > body_rect.max.y - EDGE {
-                let last = n.saturating_sub(1);
-                if let Some(c) = app.panes[pane].tab().cursor {
-                    if c < last {
-                        app.panes[pane].tab_mut().cursor = Some(c + 1);
-                        app.force_scroll_tab = Some(tab_uid);
-                        marquee_scroll = true;
-                    }
+            let dt = ui.input(|i| i.unstable_dt);
+            if let Some(m) = app.marquee.as_mut() {
+                if at_top {
+                    m.scroll_acc -= dt / 0.05;
+                } else if at_bottom {
+                    m.scroll_acc += dt / 0.05;
+                } else {
+                    m.scroll_acc = 0.0;
                 }
             }
-        } else {
+        }
+        if let Some(m) = app.marquee.clone().filter(|m| m.pane == pane && m.tab_uid == tab_uid) {
+            let origin_pos = marquee_origin_pos(&m, &row_rects);
+            let band = Rect::from_two_pos(origin_pos, pos).intersect(body_rect);
+            let mut hits = marquee_hit_range(&row_rects, band, n, m.row_height);
+            let step = m.scroll_acc.trunc() as i32;
+            if step != 0 {
+                if let Some((lo, hi)) = hits.as_mut() {
+                    if step > 0 {
+                        *hi = (*hi).saturating_add(step as usize).min(n.saturating_sub(1));
+                    } else {
+                        *lo = lo.saturating_sub((-step) as usize);
+                    }
+                }
+                if let Some(live) = app.marquee.as_mut() {
+                    live.scroll_acc -= step as f32;
+                }
+                marquee_scroll = true;
+                app.force_scroll_tab = Some(tab_uid);
+            }
+            let toward = view_index_at_y(&row_rects, pos.y, n);
+            apply_marquee_hits(
+                app.panes[pane].tab_mut(),
+                hits,
+                toward,
+                m.additive,
+                &m.keep,
+            );
+            if band.width() > 1.0 && band.height() > 1.0 {
+                paint_marquee(ui, band, theme.accent);
+            }
+        }
+        if !primary_down {
             marquee_ended = true;
         }
     }
     if marquee_ended {
         app.marquee = None;
+        app.list_press = None;
         update_preview_from_selection(app, pane);
     }
 
@@ -2313,16 +2584,24 @@ fn file_table(app: &mut ScApp, ui: &mut Ui, pane: usize) {
         && !in_scroll_gutter
         && app.marquee.is_none()
         && !marquee_ended
-        && !ui.input(|i| i.modifiers.ctrl || i.modifiers.shift || i.modifiers.command);
+        && action.click_row.is_none()
+        && action.drop_into.is_none()
+        && !dragging_files
+        && !ctrl
+        && !shift;
     if empty_click {
         let tab = app.panes[pane].tab_mut();
         if !tab.selection.is_empty() {
             tab.selection.clear();
             tab.cursor = None;
+            tab.anchor = None;
             update_preview_from_selection(app, pane);
         }
+        app.list_click = None;
+        app.list_press = None;
     }
 
+    let file_dropped = action.drop_into.is_some() || dragging_files;
     // ---- apply deferred actions (after the immutable borrow ends) ----
     if let Some((sources, dest, is_move)) = action.drop_into {
         app.drop_files_into(sources, dest, is_move);
@@ -2350,37 +2629,61 @@ fn file_table(app: &mut ScApp, ui: &mut Ui, pane: usize) {
     } else if rename_cancel {
         app.rename = None;
     }
-    if let Some((ei, vpos)) = action.select_single {
-        if app.marquee.is_none() && !action.start_marquee && !marquee_ended {
-            let tab = app.panes[pane].tab_mut();
-            tab.selection.clear();
-            tab.selection.insert(ei);
-            tab.cursor = Some(vpos);
-            update_preview_from_selection(app, pane);
+
+    if let Some((ei, vpos)) = action.click_row {
+        let skip = app.marquee.is_some()
+            || marquee_ended
+            || file_dropped
+            || ui.input(|i| i.pointer.is_decidedly_dragging())
+            || egui::DragAndDrop::has_payload_of_type::<FileDrag>(ui.ctx());
+        if !skip {
+            let press = app
+                .list_press
+                .as_ref()
+                .filter(|p| p.pane == pane && p.tab_uid == tab_uid);
+            let use_ctrl = press.map(|p| p.ctrl).unwrap_or(ctrl);
+            let use_shift = press.map(|p| p.shift).unwrap_or(shift);
+            if use_ctrl {
+                app.panes[pane].tab_mut().toggle_select(vpos);
+                update_preview_from_selection(app, pane);
+            } else if use_shift {
+                app.panes[pane].tab_mut().move_cursor(vpos, true);
+                update_preview_from_selection(app, pane);
+            } else {
+                let name = entries
+                    .get(ei as usize)
+                    .map(|e| e.name.clone())
+                    .unwrap_or_default();
+                let dbl = is_same_item_double_click(app, tab_uid, &dir_path, &name);
+                app.panes[pane].tab_mut().move_cursor(vpos, false);
+                update_preview_from_selection(app, pane);
+                if dbl || single_click {
+                    action.open = Some(ei);
+                    app.list_click = None;
+                } else {
+                    app.list_click = Some(ListClick {
+                        tab_uid,
+                        path: dir_path.clone(),
+                        name,
+                        at: Instant::now(),
+                    });
+                }
+            }
+        }
+        if app.list_press.as_ref().is_some_and(|p| p.pane == pane) {
+            app.list_press = None;
         }
     }
-    if let Some((ei, vpos)) = action.toggle {
-        let tab = app.panes[pane].tab_mut();
-        if !tab.selection.remove(&ei) {
-            tab.selection.insert(ei);
-        }
-        tab.cursor = Some(vpos);
-    }
-    if let Some(vpos) = action.range_to {
-        let tab = app.panes[pane].tab_mut();
-        let from = tab.cursor.unwrap_or(0);
-        let (a, b) = (from.min(vpos), from.max(vpos));
-        let range: Vec<u32> = tab.view.get(a..=b).map(|s| s.to_vec()).unwrap_or_default();
-        tab.selection.clear();
-        for e in range {
-            tab.selection.insert(e);
-        }
-    }
+
     if let Some(ei) = action.context_on {
         let tab = app.panes[pane].tab_mut();
         if !tab.selection.contains(&ei) {
             tab.selection.clear();
             tab.selection.insert(ei);
+            if let Some(vpos) = tab.view.iter().position(|&x| x == ei) {
+                tab.cursor = Some(vpos);
+                tab.anchor = Some(vpos);
+            }
         }
     }
     if let Some(ei) = action.open {
@@ -2402,6 +2705,11 @@ fn file_table(app: &mut ScApp, ui: &mut Ui, pane: usize) {
     }
     if force_scroll && !marquee_scroll {
         app.force_scroll_tab = None;
+    }
+    if !ui.input(|i| i.pointer.primary_down()) {
+        if app.list_press.as_ref().is_some_and(|p| p.pane == pane) {
+            app.list_press = None;
+        }
     }
 }
 
@@ -3345,12 +3653,30 @@ pub(crate) fn recover_stuck_pointer(
         return;
     }
 
-    app.marquee = None;
-    app.drag_active = false;
-
     if !ctx.input(|i| i.pointer.primary_down()) {
         return;
     }
+
+    // A normal release already arrived in this frame's raw events, so egui
+    // will process it itself; don't treat this as a stuck pointer or we'd
+    // wipe the drag payload before in-app drop handling ever sees it.
+    let already_releasing = raw.events.iter().any(|e| {
+        matches!(
+            e,
+            egui::Event::PointerButton {
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                ..
+            }
+        )
+    });
+    if already_releasing {
+        return;
+    }
+
+    app.marquee = None;
+    app.list_press = None;
+    app.drag_active = false;
 
     egui::DragAndDrop::clear_payload(ctx);
     raw.events.retain(|e| {
@@ -3393,9 +3719,15 @@ fn handle_file_drops(app: &mut ScApp, ctx: &egui::Context) {
                 .is_some_and(|p| !i.viewport_rect().contains(p));
             (gone, outside_ui)
         });
-        let outside = pointer_outside_window(app.preview.parent_hwnd)
+        let over_in_app = pointer_pos_ctx(ctx).is_some_and(|pos| {
+            dest_under_pointer(&app.drop_tab_hits, pos).is_some()
+                || dest_under_pointer(&app.drop_dir_hits, pos).is_some()
+                || dest_under_pointer(&app.drop_body_hits, pos).is_some()
+        });
+        let outside = (pointer_outside_window(app.preview.parent_hwnd)
             || pointer_gone
-            || pos_outside;
+            || pos_outside)
+            && !over_in_app;
         if !app.drag_active && outside {
             if let Some(drag) = egui::DragAndDrop::take_payload::<FileDrag>(ctx) {
                 app.drag_active = true;
@@ -3407,6 +3739,18 @@ fn handle_file_drops(app: &mut ScApp, ctx: &egui::Context) {
                 if moved {
                     app.request_listing(app.active_pane, false);
                 }
+            }
+        }
+    }
+
+    if let Some(drag) = take_file_drop(ctx) {
+        if let Some(pos) = pointer_pos_ctx(ctx) {
+            let dest = dest_under_pointer(&app.drop_tab_hits, pos)
+                .or_else(|| dest_under_pointer(&app.drop_dir_hits, pos))
+                .or_else(|| dest_under_pointer(&app.drop_body_hits, pos));
+            if let Some(dest) = dest {
+                let is_move = ctx.input(|i| i.modifiers.ctrl || i.modifiers.command);
+                app.drop_files_into(drag.paths.clone(), dest, is_move);
             }
         }
     }

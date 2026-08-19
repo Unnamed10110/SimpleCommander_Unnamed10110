@@ -35,8 +35,10 @@ pub struct TabState {
     pub locked: bool,
     /// Selected entry indices (into `snapshot.entries`, not the view).
     pub selection: HashSet<u32>,
-    /// Anchor for shift-selection, as a view position.
+    /// Focused row in `view` (keyboard cursor / scroll target).
     pub cursor: Option<usize>,
+    /// Fixed end of a shift-selection. `cursor` is the moving end.
+    pub anchor: Option<usize>,
     pub history_back: Vec<PathBuf>,
     pub history_fwd: Vec<PathBuf>,
     pub generation: u64,
@@ -46,6 +48,8 @@ pub struct TabState {
     pub custom_title: Option<String>,
     /// Optional tab color as RGB hex (e.g. "e84a4a"). `None` = default.
     pub color: Option<String>,
+    /// Vertical file-list scroll offset, kept when the tab is hidden.
+    pub scroll_y: f32,
 }
 
 impl TabState {
@@ -62,12 +66,14 @@ impl TabState {
             locked: false,
             selection: HashSet::new(),
             cursor: None,
+            anchor: None,
             history_back: Vec::new(),
             history_fwd: Vec::new(),
             generation: 0,
             flatten: false,
             custom_title: None,
             color: None,
+            scroll_y: 0.0,
         }
     }
 
@@ -134,8 +140,10 @@ impl TabState {
     fn on_path_changed(&mut self) {
         self.selection.clear();
         self.cursor = None;
+        self.anchor = None;
         self.filter.clear();
         self.flatten = false;
+        self.scroll_y = 0.0;
         self.generation += 1;
     }
 
@@ -150,6 +158,49 @@ impl TabState {
 
     pub fn selected_paths(&self) -> Vec<PathBuf> {
         self.selected_names().iter().map(|n| self.path.join(n)).collect()
+    }
+
+    /// Move the keyboard cursor. Without `extend`, this becomes a single-item
+    /// selection and the new shift-selection anchor. With `extend`, select the
+    /// range from the existing anchor to `pos`.
+    pub fn move_cursor(&mut self, pos: usize, extend: bool) {
+        let n = self.view.len();
+        if n == 0 {
+            return;
+        }
+        let pos = pos.min(n - 1);
+        if !extend {
+            self.anchor = Some(pos);
+            self.selection.clear();
+            self.selection.insert(self.view[pos]);
+        } else {
+            let from = self.anchor.or(self.cursor).unwrap_or(pos);
+            if self.anchor.is_none() {
+                self.anchor = Some(from);
+            }
+            self.selection.clear();
+            let (a, b) = (from.min(pos), from.max(pos));
+            if let Some(slice) = self.view.get(a..=b) {
+                self.selection.extend(slice.iter().copied());
+            }
+        }
+        self.cursor = Some(pos);
+    }
+
+    /// Ctrl/Cmd click: add or remove one item without moving the shift anchor
+    /// unless the item is now focused.
+    pub fn toggle_select(&mut self, pos: usize) {
+        let n = self.view.len();
+        if n == 0 {
+            return;
+        }
+        let pos = pos.min(n - 1);
+        let ei = self.view[pos];
+        if !self.selection.remove(&ei) {
+            self.selection.insert(ei);
+        }
+        self.cursor = Some(pos);
+        self.anchor = Some(pos);
     }
 
     pub fn cursor_path(&self) -> Option<PathBuf> {
@@ -320,6 +371,52 @@ mod tests {
         assert_eq!(p.tabs[1].uid, uids[0]);
         assert_eq!(p.tabs[2].uid, uids[2]);
         assert_eq!(p.active_tab, 1);
+    }
+
+    fn tab_with_view(n: usize) -> TabState {
+        let mut t = TabState::new(PathBuf::from("C:\\x"));
+        t.view = std::sync::Arc::new((0..n as u32).collect());
+        t
+    }
+
+    #[test]
+    fn move_cursor_selects_one_and_sets_anchor() {
+        let mut t = tab_with_view(8);
+        t.move_cursor(3, false);
+        assert_eq!(t.cursor, Some(3));
+        assert_eq!(t.anchor, Some(3));
+        assert_eq!(t.selection, HashSet::from([3]));
+    }
+
+    #[test]
+    fn move_cursor_extend_keeps_anchor() {
+        let mut t = tab_with_view(8);
+        t.move_cursor(1, false);
+        t.move_cursor(5, true);
+        assert_eq!(t.anchor, Some(1));
+        assert_eq!(t.cursor, Some(5));
+        assert_eq!(t.selection, HashSet::from([1, 2, 3, 4, 5]));
+        t.move_cursor(3, true);
+        assert_eq!(t.anchor, Some(1));
+        assert_eq!(t.cursor, Some(3));
+        assert_eq!(t.selection, HashSet::from([1, 2, 3]));
+        t.move_cursor(0, true);
+        assert_eq!(t.anchor, Some(1));
+        assert_eq!(t.cursor, Some(0));
+        assert_eq!(t.selection, HashSet::from([0, 1]));
+    }
+
+    #[test]
+    fn toggle_select_does_not_wipe_the_rest() {
+        let mut t = tab_with_view(5);
+        t.move_cursor(0, false);
+        t.toggle_select(2);
+        t.toggle_select(4);
+        assert_eq!(t.selection, HashSet::from([0, 2, 4]));
+        t.toggle_select(2);
+        assert_eq!(t.selection, HashSet::from([0, 4]));
+        assert_eq!(t.cursor, Some(2));
+        assert_eq!(t.anchor, Some(2));
     }
 }
 

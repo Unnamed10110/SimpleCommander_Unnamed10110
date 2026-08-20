@@ -89,6 +89,9 @@ pub struct Settings {
     pub row_height: f32,
     pub striped_rows: bool,
     pub show_icons: bool,
+    /// Show the one-click action row under the menu bar.
+    #[serde(default = "default_true")]
+    pub show_toolbar: bool,
 
     // ----- behavior -----
     /// Open items with a single click instead of double click.
@@ -162,6 +165,10 @@ impl PreviewPlacement {
     }
 }
 
+fn default_true() -> bool {
+    true
+}
+
 fn default_transfer_jobs() -> u32 {
     2
 }
@@ -180,6 +187,7 @@ impl Default for Settings {
             row_height: 22.0,
             striped_rows: true,
             show_icons: true,
+            show_toolbar: true,
             single_click_open: false,
             confirm_permanent_delete: true,
             confirm_recycle_delete: false,

@@ -576,6 +576,11 @@ fn top_bar(app: &mut ScApp, ui: &mut Ui) {
                         crate::preview::close(&mut app.preview);
                     }
                 }
+                let mut toolbar = app.settings.show_toolbar;
+                if ui.checkbox(&mut toolbar, "Toolbar").changed() {
+                    app.settings.show_toolbar = toolbar;
+                    app.persist_settings();
+                }
                 ui.label("Preview placement");
                 let place = app.settings.preview_placement;
                 for opt in [
@@ -796,7 +801,245 @@ fn top_bar(app: &mut ScApp, ui: &mut Ui) {
                 app.show_settings = true;
             }
         });
+        if app.settings.show_toolbar {
+            ui.painter().hline(
+                ui.max_rect().x_range(),
+                ui.cursor().min.y - 1.0,
+                egui::Stroke::new(1.0, app.theme.separator),
+            );
+            ui.add_space(2.0);
+            action_toolbar(app, ui);
+            ui.add_space(1.0);
+        }
     });
+}
+
+/// Height of the action toolbar row, matching `icons::button`'s 20pt buttons.
+const TOOLBAR_ROW_H: f32 = 20.0;
+
+/// One toolbar action, dispatched after the row is drawn so the render loop
+/// never holds a borrow of `app`.
+#[derive(Clone, Copy)]
+enum ToolbarAction {
+    NewFolder,
+    NewFile,
+    Cut,
+    Copy,
+    Paste,
+    CopyPath,
+    Rename,
+    Delete,
+    CopyToOther,
+    MoveToOther,
+    Compare,
+    Refresh,
+    ToggleFavorite,
+    ToggleHidden,
+    Search,
+}
+
+enum ToolbarItem {
+    Separator,
+    Button {
+        glyph: crate::icons::Glyph,
+        tip: String,
+        enabled: bool,
+        selected: bool,
+        action: ToolbarAction,
+    },
+}
+
+/// Row of one-click actions for the active pane, right-aligned.
+///
+/// The row is built as data rather than as inline widget calls because the
+/// right-to-left layout needs the list walked backwards (see below); declaring
+/// the buttons once in reading order keeps that detail in one place.
+///
+/// Buttons that need a selection, or a non-empty clipboard, are disabled rather
+/// than hidden: the row keeps the same shape so its layout stays learnable.
+fn action_toolbar(app: &mut ScApp, ui: &mut Ui) {
+    use crate::icons::Glyph;
+    use ToolbarAction as A;
+
+    let pane = app.active_pane;
+    let (has_sel, dir_path, in_recycle) = {
+        let tab = app.panes[pane].tab();
+        (
+            !tab.selection.is_empty(),
+            tab.path.clone(),
+            sc_shell::recycle::is_recycle_path(&tab.path),
+        )
+    };
+    let writable = !in_recycle && crate::vfs::split_zip_path(&dir_path).is_none();
+    let can_paste = sc_shell::clipboard::clipboard_has_files() && writable;
+    let is_fav = app.is_favorite(&dir_path);
+    let dual = matches!(app.layout, PaneLayout::Dual(_));
+    let k = &app.settings.keymap;
+
+    let button = |glyph, enabled, selected, tip: String, action| ToolbarItem::Button {
+        glyph,
+        tip,
+        enabled,
+        selected,
+        action,
+    };
+    let items = vec![
+        button(Glyph::NewFolder, writable, false, "New folder".into(), A::NewFolder),
+        button(Glyph::NewFile, writable, false, "New file".into(), A::NewFile),
+        ToolbarItem::Separator,
+        button(
+            Glyph::Cut,
+            has_sel && writable,
+            false,
+            format!("Cut ({})", k.cut.label()),
+            A::Cut,
+        ),
+        button(
+            Glyph::Copy,
+            has_sel,
+            false,
+            format!("Copy ({})", k.copy.label()),
+            A::Copy,
+        ),
+        button(
+            Glyph::Paste,
+            can_paste,
+            false,
+            format!("Paste ({})", k.paste.label()),
+            A::Paste,
+        ),
+        button(
+            Glyph::Link,
+            true,
+            false,
+            "Copy path of the selection, or of this folder".into(),
+            A::CopyPath,
+        ),
+        ToolbarItem::Separator,
+        button(
+            Glyph::Rename,
+            has_sel && writable,
+            false,
+            format!("Rename ({})", k.rename.label()),
+            A::Rename,
+        ),
+        button(
+            Glyph::Trash,
+            has_sel,
+            false,
+            format!("Delete ({})", k.delete.label()),
+            A::Delete,
+        ),
+        ToolbarItem::Separator,
+        button(
+            Glyph::Copy,
+            has_sel && dual,
+            false,
+            format!("Copy to other pane ({})", k.copy_to_other.label()),
+            A::CopyToOther,
+        ),
+        button(
+            Glyph::Move,
+            has_sel && dual,
+            false,
+            format!("Move to other pane ({})", k.move_to_other.label()),
+            A::MoveToOther,
+        ),
+        button(Glyph::Compare, dual, false, "Compare folders".into(), A::Compare),
+        ToolbarItem::Separator,
+        button(
+            Glyph::Refresh,
+            true,
+            false,
+            format!("Refresh ({})", k.refresh.label()),
+            A::Refresh,
+        ),
+        button(
+            if is_fav { Glyph::StarFilled } else { Glyph::Star },
+            true,
+            is_fav,
+            if is_fav {
+                "Remove this folder from favorites".into()
+            } else {
+                "Add this folder to favorites".into()
+            },
+            A::ToggleFavorite,
+        ),
+        button(
+            Glyph::Eye,
+            true,
+            app.show_hidden,
+            "Show hidden files".into(),
+            A::ToggleHidden,
+        ),
+        button(
+            Glyph::Search,
+            true,
+            app.search.open,
+            format!("Search ({})", k.search.label()),
+            A::Search,
+        ),
+    ];
+
+    let mut fired: Option<ToolbarAction> = None;
+
+    // Right-aligned: `right_to_left` places the first widget added furthest
+    // right, so the list is walked backwards to keep the buttons reading in
+    // their declared order.
+    //
+    // The height is allocated explicitly. `with_layout` would hand the child
+    // the whole available rect, which inside a top panel is the full window
+    // height — the panel then grows to fit it and swallows the window.
+    let row = egui::vec2(ui.available_width(), TOOLBAR_ROW_H);
+    ui.allocate_ui_with_layout(row, egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
+        for item in items.iter().rev() {
+            match item {
+                ToolbarItem::Separator => {
+                    ui.add_space(2.0);
+                    ui.separator();
+                    ui.add_space(2.0);
+                }
+                ToolbarItem::Button {
+                    glyph,
+                    tip,
+                    enabled,
+                    selected,
+                    action,
+                } => {
+                    if crate::icons::button_enabled(ui, *glyph, *selected, *enabled, tip).clicked()
+                    {
+                        fired = Some(*action);
+                    }
+                }
+            }
+        }
+    });
+
+    let Some(action) = fired else { return };
+    match action {
+        A::NewFolder => app.begin_new_folder(pane),
+        A::NewFile => app.begin_new_file(pane),
+        A::Cut => app.copy_selection_to_clipboard(pane, true),
+        A::Copy => app.copy_selection_to_clipboard(pane, false),
+        A::Paste => app.paste_into(pane),
+        A::CopyPath => app.copy_paths_to_clipboard(pane),
+        A::Rename => app.start_rename(pane),
+        A::Delete => app.delete_selection(pane, false),
+        A::CopyToOther => app.transfer_to_other_pane(pane, false),
+        A::MoveToOther => app.transfer_to_other_pane(pane, true),
+        A::Compare => app.open_compare(),
+        A::Refresh => app.request_listing(pane, true),
+        A::ToggleFavorite => app.toggle_favorite(dir_path),
+        A::ToggleHidden => {
+            app.show_hidden = !app.show_hidden;
+            app.settings.session.show_hidden = app.show_hidden;
+            app.rebuild_view(0);
+            app.rebuild_view(1);
+            app.persist_settings();
+        }
+        A::Search => app.open_search(),
+    }
 }
 
 pub fn run_plugin_command(app: &mut ScApp, plugin_index: usize, label: &str) {
@@ -1838,7 +2081,11 @@ fn file_table(app: &mut ScApp, ui: &mut Ui, pane: usize) {
         let idle = crate::theme::mix_rgb(theme.selection_bg, theme.bg, 0.55);
         ui.visuals_mut().selection.bg_fill = idle;
     }
-    let table_rect = ui.max_rect();
+    // The space left for the table, NOT `ui.max_rect()`: max_rect is the whole
+    // pane, so deriving the body from it put `list_bg` on top of the tab strip
+    // and address bar. Because `list_bg` is registered after those widgets, it
+    // won the hit test and swallowed every breadcrumb and edit-path click.
+    let table_rect = ui.available_rect_before_wrap();
     let header_h = 22.0;
     // Everything below the column headers. `Ui::interact` only registers a
     // widget rect, so this claims no layout space and does not move the table.
@@ -3686,4 +3933,72 @@ fn handle_file_drops(app: &mut ScApp, ctx: &egui::Context) {
         .unwrap_or(app.active_pane);
     let dest = app.panes[pane.min(app.panes.len() - 1)].tab().path.clone();
     app.drop_files_into(dropped, dest, false);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TOOLBAR_ROW_H;
+
+    /// Runs a frame against the real root `Ui` — the same one eframe hands
+    /// `App::ui`, and therefore the same situation the toolbar row sits in —
+    /// and reports the height each layout style claims.
+    fn row_heights() -> (f32, f32) {
+        let ctx = egui::Context::default();
+        let mut raw = egui::RawInput::default();
+        raw.screen_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1000.0, 800.0),
+        ));
+
+        let mut unbounded = 0.0;
+        let mut bounded = 0.0;
+        let mut out = ctx.run_ui(raw, |ui| {
+            // What the toolbar row used to do.
+            unbounded = ui
+                .with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label("x");
+                })
+                .response
+                .rect
+                .height();
+            // What it does now.
+            bounded = ui
+                .allocate_ui_with_layout(
+                    egui::vec2(ui.available_width(), TOOLBAR_ROW_H),
+                    egui::Layout::right_to_left(egui::Align::Center),
+                    |ui| {
+                        ui.label("x");
+                    },
+                )
+                .response
+                .rect
+                .height();
+        });
+        // The frame rasterised glyphs into the font atlas; egui asserts that
+        // the resulting texture delta is consumed rather than dropped.
+        out.textures_delta.clear();
+        (unbounded, bounded)
+    }
+
+    #[test]
+    fn toolbar_row_does_not_claim_the_whole_window() {
+        let (_unbounded, bounded) = row_heights();
+        assert!(
+            bounded <= TOOLBAR_ROW_H + 4.0,
+            "toolbar row claimed {bounded}pt, expected about {TOOLBAR_ROW_H}pt"
+        );
+    }
+
+    /// Documents *why* the explicit allocation is load-bearing: `with_layout`
+    /// hands the child the entire available rect, so inside a top panel the row
+    /// grows to the full window height and drags the panel down with it.
+    #[test]
+    fn with_layout_would_over_claim_the_height() {
+        let (unbounded, bounded) = row_heights();
+        assert!(
+            unbounded > bounded * 4.0,
+            "expected with_layout to over-claim (got {unbounded}pt vs {bounded}pt); \
+             if egui changed this, the explicit allocation is no longer needed"
+        );
+    }
 }

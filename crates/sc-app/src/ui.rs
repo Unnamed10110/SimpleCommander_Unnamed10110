@@ -3884,30 +3884,56 @@ fn handle_file_drops(app: &mut ScApp, ctx: &egui::Context) {
     // In-app drops are handled by the widgets themselves (see `file_drop_target`),
     // which is why there is no global "what was under the pointer" lookup here.
     // This function only bridges to and from the OS.
-    if egui::DragAndDrop::has_payload_of_type::<FileDrag>(ctx) && !app.ole_drag_active {
-        // Poll while a drag is live so the badge tracks the cursor and the
-        // window-exit test below stays responsive.
+    let dragging = egui::DragAndDrop::has_payload_of_type::<FileDrag>(ctx);
+    let button_down = async_key_down(0x01); // VK_LBUTTON
+
+    if !dragging || !button_down {
+        if app.mouse_captured {
+            app.mouse_captured = false;
+            sc_shell::drag::release_mouse();
+        }
+        // The button came up with a payload still live and no widget having
+        // taken it. A release outside our window never reaches egui, so nothing
+        // else would ever clear it and the drag badge would stay on screen.
+        if dragging && !button_down && !app.ole_drag_active {
+            egui::DragAndDrop::clear_payload(ctx);
+            app.end_list_gesture();
+        }
+    }
+
+    if dragging && button_down && !app.ole_drag_active {
+        // Keep frames coming: the exit test below is a poll, not an event.
         ctx.request_repaint();
-        // Both of these are pure queries — unlike SetCapture, they do not
-        // perturb the input state egui is reading.
-        let button_down = async_key_down(0x01); // VK_LBUTTON
-        let left_window = pointer_outside_window(app.preview.parent_hwnd)
+        // Capture is what keeps mouse positions arriving after the cursor leaves
+        // the client area. Without it winit stops reporting movement, egui's
+        // `latest_pos` freezes at its last inside value, and the drag can never
+        // be handed off.
+        if !app.mouse_captured {
+            app.mouse_captured = true;
+            sc_shell::drag::capture_mouse(app.preview.parent_hwnd);
+        }
+        let outside = pointer_outside_window(app.preview.parent_hwnd)
             || ctx.input(|i| {
                 i.pointer
                     .latest_pos()
                     .is_none_or(|p| !i.viewport_rect().contains(p))
             });
-        if button_down && left_window {
+        if outside {
             if let Some(drag) = egui::DragAndDrop::take_payload::<FileDrag>(ctx) {
                 app.ole_drag_active = true;
+                // `DoDragDrop` installs its own capture and cannot track the
+                // gesture while we still hold ours, so let go first.
+                app.mouse_captured = false;
+                sc_shell::drag::release_mouse();
                 // Blocking: Windows pumps its own message loop until the drop.
                 let moved = sc_shell::drag::start_drag(&drag.paths) == Some(true);
                 app.ole_drag_active = false;
-                // The release happened inside that modal loop; tell the input
-                // hook to synthesise it on the next frame.
+                // The release happened inside that modal loop, so egui never saw
+                // it: have the input hook synthesise one on the next frame.
                 app.pointer_reset = true;
                 if moved {
-                    app.request_listing(drag.from_pane.min(app.panes.len() - 1), false);
+                    let from = drag.from_pane.min(app.panes.len().saturating_sub(1));
+                    app.request_listing(from, false);
                 }
             }
         }

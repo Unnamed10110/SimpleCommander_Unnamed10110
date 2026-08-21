@@ -246,6 +246,10 @@ pub struct ScApp {
     pub drop_hint: Option<crate::interact::DropHint>,
     /// Guard so only one OLE drag starts per gesture.
     pub ole_drag_active: bool,
+    /// True while we hold the OS mouse capture for an in-flight file drag.
+    /// Capture is what keeps mouse positions arriving once the cursor leaves
+    /// the client area; it must be released before handing off to OLE.
+    pub mouse_captured: bool,
     /// Set when a modal OLE drag swallowed the mouse-up, so the next
     /// `raw_input_hook` injects the release egui never saw.
     pub pointer_reset: bool,
@@ -453,6 +457,7 @@ impl ScApp {
             pane_rects: Vec::new(),
             drop_hint: None,
             ole_drag_active: false,
+            mouse_captured: false,
             pointer_reset: false,
             split_ratio: session.split_ratio.clamp(0.15, 0.85),
             sidebar_width: session.sidebar_width.clamp(140.0, 480.0),
